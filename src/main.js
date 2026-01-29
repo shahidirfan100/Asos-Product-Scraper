@@ -292,7 +292,6 @@ function parseJsonSafe(str) {
 
 function parseDomProducts(html, $) {
     const products = [];
-    // Selectors based on browser investigation
     const tiles = $('article, [data-testid="productTile"], li[class*="productTile"]');
 
     tiles.each((i, el) => {
@@ -306,36 +305,59 @@ function parseDomProducts(html, $) {
             const id = idMatch ? idMatch[1] : `dom-${i}`;
 
             // Image
-            const img = tile.find('img').first();
-            const imageUrl = img.attr('src');
-
-            // Metadata from aria-label on info div is very rich
-            const infoDiv = tile.find('[class*="productInfo"]');
-            const ariaLabel = infoDiv.attr('aria-label') || link.attr('title') || '';
-
-            // Extract prices
-            let priceVal = null;
-            let origPriceVal = null;
-            const priceText = tile.find('[data-testid="current-price"]').text() || tile.text();
-
-            if (ariaLabel) {
-                // "Original price $124.75 current price $106.65"
-                const currentMatch = ariaLabel.match(/current price\s*([$£€]?\d+(?:\.\d+)?)/i);
-                const originalMatch = ariaLabel.match(/Original price\s*([$£€]?\d+(?:\.\d+)?)/i);
-                if (currentMatch) priceVal = parsePriceText(currentMatch[1]);
-                if (originalMatch) origPriceVal = parsePriceText(originalMatch[1]);
+            // Try explicit image selector first, then fallback
+            const img = tile.find('img[class*="productImage"], img').first();
+            let imageUrl = img.attr('src');
+            // Ensure high-res or clean URL
+            if (imageUrl) {
+                // Remove width params to get cleaner image
+                imageUrl = imageUrl.split('?')[0];
             }
 
-            if (!priceVal) {
-                // Fallback to text parsing
-                priceVal = parsePriceText(priceText);
+            // Title & Brand
+            // Description often contains both Brand + Title or just Title
+            const descriptionText = tile.find('p[class*="productDescription"]').text().trim();
+            const ariaLabel = infoDivAttr(tile, link, 'aria-label');
+
+            // Extracting Brand is hard without specific classes, but often ASOS titles start with Brand
+            // For now, we leave Brand null unless we find a specific element or pattern
+            // Some ASOS tiles have a 'div[class*="brandName"]' or similar hidden? Not in recent scans.
+            // We will refine Title to remove Price if it leaked in.
+
+            // Prices
+            // Robust extraction from aria-label or text
+            // Text is often "£34.00" or "£34.00\nWas £40.00"
+            const priceSection = tile.find('span[class*="price"]').first().parent(); // Often container
+            const currentPriceText = tile.find('span[data-testid="current-price"]').text() ||
+                tile.find('span[class*="saleAmount"]').text() ||
+                tile.find('span[class*="price"]').first().text();
+
+            let priceVal = parsePriceText(currentPriceText);
+
+            // Aria-label is usually "Title, current price $XX, original price $YY"
+            // We can re-parse title from aria-label if description is empty, splitting by 'current price'
+            let title = descriptionText;
+            if (!title && ariaLabel) {
+                title = ariaLabel.split(/current price|Original price/i)[0].replace(/,$/, '').trim();
             }
 
-            // Title
-            const title = tile.find('p[class*="productDescription"]').text() ||
-                img.attr('alt') ||
-                ariaLabel.split(',')[0] ||
-                'Unknown Product';
+            // Clean title if it contains price (Edge case reported by user)
+            // e.g. "Hoodie... £34.00" -> remove price part if present at end
+            if (title && priceVal) {
+                // specific check if title ENDS with price-like text
+                title = title.replace(/\s*£\d+\.\d+.*$/, '').trim();
+            }
+
+            // Currency
+            let currency = null;
+            if (currentPriceText) {
+                const currencyMatch = currentPriceText.match(/[$£€]/);
+                if (currencyMatch) currency = currencyMatch[0];
+            }
+
+            // Badge / Product Type
+            // Often in a 'div[class*="sellingFast"]' or similar overlay
+            const badge = tile.find('div[class*="sellingFast"], span[class*="overlay"]').text().trim() || null;
 
             products.push({
                 id,
@@ -343,16 +365,22 @@ function parseDomProducts(html, $) {
                 url: href,
                 imageUrl,
                 price: {
-                    current: { value: priceVal, text: priceText },
-                    previous: { value: origPriceVal }
+                    current: { value: priceVal, text: currentPriceText },
+                    previous: { value: null } // Hard to extract reliably from mixed DOM without clear selectors
                 },
-                brandName: null, // Hard to get from DOM reliably without classes
-                isMarkedDown: !!origPriceVal
+                brandName: null, // Without explicit brand field, better null than wrong
+                isMarkedDown: false,
+                currency: currency,
+                badge: badge
             });
         } catch (e) {
-            // Ignore single failures
+            // Ignore (log.debug(e.message) if needed)
         }
     });
 
     return products;
+}
+
+function infoDivAttr(tile, link, attr) {
+    return tile.find('[class*="productInfo"]').attr(attr) || link.attr(attr) || '';
 }
