@@ -65,12 +65,7 @@ const crawler = new CheerioCrawler({
     maxConcurrency: 2,
     requestHandlerTimeoutSecs: 60,
     ignoreSslErrors: true,
-    headerGeneratorOptions: {
-        browsers: [{ name: 'chrome', minVersion: 110 }],
-        devices: ['desktop'],
-        locales: ['en-US'],
-        operatingSystems: ['windows'],
-    },
+
 
     async requestHandler({ $, request, crawler: crawlerInstance, body }) {
         const offset = request.userData?.offset || 0;
