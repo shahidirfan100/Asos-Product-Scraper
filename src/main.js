@@ -117,6 +117,9 @@ function normalizeApiProduct(product) {
     const currentPrice = price.current?.value ?? price.value ?? null;
     const previousPrice = price.previous?.value ?? price.rrp?.value ?? price.was?.value ?? null;
 
+    // Support both 'imageUrl' and 'image' (which often contains the relative path)
+    const rawImage = product.imageUrl || product.image || product.images?.[0]?.url || product.media?.images?.[0]?.url || null;
+
     return {
         id,
         name: product.name || product.title || null,
@@ -140,7 +143,7 @@ function normalizeApiProduct(product) {
             isMarkedDown: price.isMarkedDown || (previousPrice && currentPrice && previousPrice > currentPrice) || false,
         },
         url: product.url?.startsWith('http') ? product.url : `https://www.asos.com${product.url || ''}`,
-        imageUrl: product.imageUrl || product.images?.[0]?.url || product.media?.images?.[0]?.url || null,
+        imageUrl: normalizeImageUrl(rawImage),
         images: product.images || [],
         colour: product.colour || product.colourWayId || product.color || product.colourWayLabel || null,
         isInStock: product.isInStock ?? !product.isNoSize ?? true,
@@ -224,7 +227,7 @@ const crawler = new CheerioCrawler({
         async ({ request }) => {
             const headers = headerGenerator.getHeaders();
             request.headers = { ...headers, ...request.headers };
-            
+
             // Add random delay for stealth (200-800ms)
             await new Promise(resolve => setTimeout(resolve, 200 + Math.random() * 600));
         },
@@ -310,7 +313,7 @@ const crawler = new CheerioCrawler({
         // ==================================================
         // SAVE PRODUCTS DIRECTLY FROM LISTING (No detail page visits!)
         // ==================================================
-        
+
         const filtered = products.filter((p) => pricePasses(p.price, minPrice, maxPrice));
         const needed = resultsWanted - saved;
         const toSave = filtered.slice(0, needed);
@@ -332,7 +335,7 @@ const crawler = new CheerioCrawler({
 
             // Transform to final output format
             const finalProduct = transformToFinalFormat(p);
-            
+
             // Validate critical fields before saving
             if (!finalProduct.product_id || !finalProduct.title || !finalProduct.product_url) {
                 log.warning(`Skipping product with missing critical data: ${finalProduct.product_id || 'unknown'}`);
@@ -344,7 +347,7 @@ const crawler = new CheerioCrawler({
 
             if (saved % 10 === 0) log.info(`Saved ${saved} products`);
             await pushBufferedData();
-            
+
             if (saved >= resultsWanted) {
                 shouldStop = true;
                 log.info(`✓ Reached target of ${resultsWanted} products!`);
@@ -396,38 +399,36 @@ function transformToFinalFormat(p) {
     const currentPrice = extractPriceValue(p.price);
     const originalPrice = p.price?.previous?.value ?? p.price?.was?.value ?? p.price?.rrp?.value ?? null;
     const currency = p.price?.currency || p.currency || '£';
-    
+
     // Calculate discount
     let discount = null;
     if (originalPrice && currentPrice && originalPrice > currentPrice) {
         discount = `${Math.round(((originalPrice - currentPrice) / originalPrice) * 100)}%`;
     }
-    
+
     // Format prices
     const formattedPrice = currentPrice ? `${currency}${currentPrice.toFixed(2)}` : null;
     const formattedOriginalPrice = originalPrice ? `${currency}${originalPrice.toFixed(2)}` : null;
-    
+
     // Determine URL
     let productUrl = p.url || p.productUrl;
     if (productUrl && !productUrl.startsWith('http')) {
         productUrl = `https://www.asos.com${productUrl}`;
     }
-    
+
     // Get brand - try all possible properties
     const brand = p.brandName || p.brand?.name || p.brand || null;
-    
+
     // Get color - try all variants
     const color = p.colour || p.color || p.colourWayLabel || p.colourWayId || null;
-    
+
     // Get description from available sources
-    // Some products have description in productType, badges, or additionalImageUrls text
     let description = null;
     if (p.productType && p.productType !== 'Product') {
         description = p.productType;
     } else if (p.badges && p.badges.length > 0) {
         const badgeTexts = p.badges.map(b => b.text || b.label).filter(Boolean);
         if (badgeTexts.length > 0) {
-            // Clean up badge text - separate "MORE COLOURS" and "Selling fast"
             description = badgeTexts.join(' | ')
                 .replace(/MORE\s*COLOURS/gi, 'More Colors')
                 .replace(/Selling\s*fast/gi, 'Selling Fast')
@@ -435,18 +436,17 @@ function transformToFinalFormat(p) {
                 .trim();
         }
     }
-    
-    // If description is just badges concatenated, clean it up
+
     if (description) {
         description = description
-            .replace(/([a-z])([A-Z])/g, '$1 | $2') // Add separator between camelCase
-            .replace(/\s+\|\s+/g, ' | ') // Normalize separators
+            .replace(/([a-z])([A-Z])/g, '$1 | $2')
+            .replace(/\s+\|\s+/g, ' | ')
             .trim();
     }
-    
-    // Get best available image
-    const imageUrl = p.imageUrl || p.images?.[0]?.url || p.media?.images?.[0]?.url || null;
-    
+
+    // Get best available image - handle both 'imageUrl' and 'image'
+    const imageUrl = p.imageUrl || p.image || p.images?.[0]?.url || p.media?.images?.[0]?.url || null;
+
     return {
         product_id: id,
         title: p.name || p.title || null,
@@ -456,7 +456,7 @@ function transformToFinalFormat(p) {
         discount: discount,
         currency: currency,
         color: color,
-        size_available: 'Available online', // Listing pages don't have detailed size info
+        size_available: 'Available online',
         is_sale: p.isMarkedDown || p.price?.isMarkedDown || (originalPrice && currentPrice && originalPrice > currentPrice) ? 'Yes' : 'No',
         product_url: productUrl,
         image_url: normalizeImageUrl(imageUrl),
@@ -478,17 +478,25 @@ function extractWindowAsos(html) {
         if (parsed) return parsed;
     }
 
-    // 2) Inline assignment: window.asos = {...}; (minified). Evaluate in vm but only after isolating the object literal
+    // 2) Inline assignment: window.asos = {...}; or window.asos.plp = {...};
     const scriptRegex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
     while ((match = scriptRegex.exec(html)) !== null) {
         const script = match[1];
         if (!script || !script.includes('window.asos')) continue;
 
-        // Extract JSON substring after first equals
-        const assignMatch = script.match(/window\.asos\s*=\s*(\{[\s\S]*?\});?/);
-        if (assignMatch?.[1]) {
-            const parsed = parseJsonSafe(assignMatch[1]);
-            if (parsed) return parsed;
+        // Try various assignment patterns
+        const patterns = [
+            /window\.asos\s*=\s*(\{[\s\S]*?\});?/,
+            /window\.asos\.plp\s*=\s*(\{[\s\S]*?\});?/,
+            /window\.asos\.search\s*=\s*(\{[\s\S]*?\});?/
+        ];
+
+        for (const pattern of patterns) {
+            const assignMatch = script.match(pattern);
+            if (assignMatch?.[1]) {
+                const parsed = parseJsonSafe(assignMatch[1]);
+                if (parsed) return parsed;
+            }
         }
 
         // Fallback: evaluate inside sandbox
@@ -500,12 +508,12 @@ function extractWindowAsos(html) {
             localStorage: { getItem: () => null, setItem: () => undefined },
         };
 
-        const code = `var window = { asos: {} };
+        const code = `var window = { asos: { plp: {}, search: {} } };
             ${script}
             globalThis.result = window.asos;`;
 
         try {
-            vm.runInNewContext(code, context, { timeout: 500 });
+            vm.runInNewContext(code, context, { timeout: 1000 });
             if (context.result && Object.keys(context.result).length) return context.result;
         } catch (error) {
             log.debug(`window.asos eval failed: ${error.message}`);
@@ -589,37 +597,41 @@ function parsePriceText(text) {
 
 function normalizeImageUrl(url) {
     if (!url) return null;
-    let clean = url.trim();
-    
+    let clean = String(url).trim();
+
     // Handle protocol-relative URLs
     if (clean.startsWith('//')) clean = `https:${clean}`;
-    
-    // Handle relative paths
-    if (!clean.startsWith('http')) {
-        clean = `https://images.asos-media.com/products/${clean}`;
+
+    // If it's already a full URL with images.asos-media.com, don't prepend again
+    if (clean.includes('images.asos-media.com')) {
+        if (!clean.startsWith('http')) {
+            clean = `https://${clean.replace(/^\/+/, '')}`;
+        }
+    } else if (!clean.startsWith('http')) {
+        // Handle relative paths - ASOS often provides paths like 'products/bershka-baggy-jeans.../209377957-1-black'
+        clean = `https://images.asos-media.com/${clean.replace(/^\/+/, '')}`;
     }
-    
+
     // Remove query parameters first
     clean = clean.split('?')[0];
-    
-    // ASOS images need proper size suffix and extension
-    // If URL doesn't have an extension or size suffix, add them
+
+    // ASOS images need proper size suffix and extension if they are missing
     if (!clean.match(/\.(jpg|jpeg|png|webp)$/i)) {
-        // Check if it already has a size suffix (e.g., -1-black, -2-white)
-        if (!clean.match(/-\d+-[a-z]+$/i)) {
-            // Add default size suffix if missing
-            clean = `${clean}-1-product`;
+        // Only append if it looks like a path without an extension
+        // Check if it already has a common suffix (e.g., -1, -1-product)
+        if (!clean.match(/-\d+(-[a-z]+)?$/i)) {
+            // Add default suffix if totally missing extension and suffix
+            clean = `${clean}-1`;
         }
         // Add .jpg extension
         clean = `${clean}.jpg`;
     }
-    
+
     // Ensure high-quality image by specifying dimensions
-    // ASOS supports ?$XXL$ format for better quality
     if (!clean.includes('?')) {
         clean = `${clean}?$XXL$`;
     }
-    
+
     return clean;
 }
 
@@ -629,6 +641,7 @@ function normalizeProduct(p) {
     const productUrl = urlPath?.startsWith('http') ? urlPath : urlPath ? `https://www.asos.com${urlPath}` : null;
     const currentPrice = extractPriceValue(p.price) ?? null;
     const originalPrice = p.price?.previous?.value ?? p.price?.was?.value ?? p.price?.rrp?.value ?? null;
+    const rawImage = p.imageUrl || p.image || p.images?.[0]?.url || p.media?.images?.[0]?.url || null;
 
     return {
         id,
@@ -641,7 +654,7 @@ function normalizeProduct(p) {
         is_marked_down: Boolean(p.price?.isMarkedDown || (originalPrice && currentPrice && originalPrice > currentPrice)),
         is_in_stock: p.isNoSize ? false : p.isInStock ?? true,
         url: productUrl,
-        image_url: normalizeImageUrl(p.imageUrl || p.images?.[0]?.url || p.media?.images?.[0]?.url || null),
+        image_url: normalizeImageUrl(rawImage),
         color: p.colour || p.colourWayLabel || null,
         badge: p.badges?.[0]?.text || p.productType || null,
     };
@@ -683,10 +696,10 @@ function parseDomProducts(html, $) {
             // Image - ASOS uses lazy loading, check multiple attributes
             const img = tile.find('img[class*="productImage"], img').first();
             let imageUrl = null;
-            
+
             // Priority order: data-src (lazy load), src, srcset
             imageUrl = img.attr('data-src') || img.attr('src');
-            
+
             // If still no image, try srcset
             if (!imageUrl || imageUrl.includes('placeholder') || imageUrl.includes('data:image')) {
                 const srcset = img.attr('srcset') || img.attr('data-srcset');
@@ -696,7 +709,7 @@ function parseDomProducts(html, $) {
                     imageUrl = srcsetImages[0] || null;
                 }
             }
-            
+
             // Normalize and ensure proper format
             if (imageUrl && !imageUrl.includes('placeholder') && !imageUrl.includes('data:image')) {
                 imageUrl = normalizeImageUrl(imageUrl);
@@ -767,7 +780,7 @@ function parseDomProducts(html, $) {
             // Try to extract color from title or aria-label
             // Colors appear as "in [color]" but stop before extra descriptors
             let color = null;
-            
+
             // First try from title/description
             if (title || descriptionText) {
                 const text = title || descriptionText;
@@ -779,7 +792,7 @@ function parseDomProducts(html, $) {
                     color = color.replace(/\s+(leather|suede|nubuck|fabric|material|print|croc)$/i, '').trim();
                 }
             }
-            
+
             // Fallback: try aria-label
             if (!color && ariaLabel) {
                 const colorMatch = ariaLabel.match(/\s+in\s+([a-z][a-z\s/-]+?)(?:,|\s+current|\s+with|$)/i);
@@ -792,14 +805,14 @@ function parseDomProducts(html, $) {
             // Badge / Product Type - extract and clean up
             const badgeElements = tile.find('div[class*="sellingFast"], span[class*="overlay"], div[class*="badge"], span[class*="badge"]');
             let badges = [];
-            
+
             badgeElements.each((idx, el) => {
                 const badgeText = $(el).text().trim();
                 if (badgeText && badgeText.length > 0) {
                     badges.push(badgeText);
                 }
             });
-            
+
             // Clean and deduplicate badges
             badges = [...new Set(badges)];
             const badge = badges.length > 0 ? badges.join(' | ') : null;

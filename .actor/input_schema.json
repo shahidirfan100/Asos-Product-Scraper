@@ -20,13 +20,13 @@
         },
         "minPrice": {
             "title": "Minimum Price",
-            "type": "number",
+            "type": "integer",
             "description": "Filter products with price greater than or equal to this value.",
             "minimum": 0
         },
         "maxPrice": {
             "title": "Maximum Price",
-            "type": "number",
+            "type": "integer",
             "description": "Filter products with price less than or equal to this value.",
             "minimum": 0
         },
