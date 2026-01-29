@@ -427,8 +427,21 @@ function transformToFinalFormat(p) {
     } else if (p.badges && p.badges.length > 0) {
         const badgeTexts = p.badges.map(b => b.text || b.label).filter(Boolean);
         if (badgeTexts.length > 0) {
-            description = badgeTexts.join(', ');
+            // Clean up badge text - separate "MORE COLOURS" and "Selling fast"
+            description = badgeTexts.join(' | ')
+                .replace(/MORE\s*COLOURS/gi, 'More Colors')
+                .replace(/Selling\s*fast/gi, 'Selling Fast')
+                .replace(/\s+/g, ' ')
+                .trim();
         }
+    }
+    
+    // If description is just badges concatenated, clean it up
+    if (description) {
+        description = description
+            .replace(/([a-z])([A-Z])/g, '$1 | $2') // Add separator between camelCase
+            .replace(/\s+\|\s+/g, ' | ') // Normalize separators
+            .trim();
     }
     
     // Get best available image
@@ -667,23 +680,28 @@ function parseDomProducts(html, $) {
             const idMatch = href.match(/\/prd\/(\d+)/i) || href.match(/\/grp\/(\d+)/i);
             const id = idMatch ? idMatch[1] : `dom-${i}`;
 
-            // Image - try multiple attributes for best quality
+            // Image - ASOS uses lazy loading, check multiple attributes
             const img = tile.find('img[class*="productImage"], img').first();
-            let imageUrl = img.attr('src') || img.attr('data-src') || img.attr('srcset')?.split(',')[0]?.split(' ')[0];
+            let imageUrl = null;
             
-            // If srcset, get the highest quality version
-            if (!imageUrl || imageUrl.includes('placeholder')) {
-                const srcset = img.attr('srcset');
+            // Priority order: data-src (lazy load), src, srcset
+            imageUrl = img.attr('data-src') || img.attr('src');
+            
+            // If still no image, try srcset
+            if (!imageUrl || imageUrl.includes('placeholder') || imageUrl.includes('data:image')) {
+                const srcset = img.attr('srcset') || img.attr('data-srcset');
                 if (srcset) {
-                    // Get last (highest quality) image from srcset
+                    // Get first or highest quality image from srcset
                     const srcsetImages = srcset.split(',').map(s => s.trim().split(' ')[0]);
-                    imageUrl = srcsetImages[srcsetImages.length - 1] || srcsetImages[0];
+                    imageUrl = srcsetImages[0] || null;
                 }
             }
             
             // Normalize and ensure proper format
-            if (imageUrl) {
+            if (imageUrl && !imageUrl.includes('placeholder') && !imageUrl.includes('data:image')) {
                 imageUrl = normalizeImageUrl(imageUrl);
+            } else {
+                imageUrl = null;
             }
 
             // Title & Brand
@@ -692,15 +710,22 @@ function parseDomProducts(html, $) {
             const ariaLabel = infoDivAttr(tile, link, 'aria-label');
 
             // Try to extract brand from title
-            // ASOS titles follow pattern: "Brand Name product description"
-            // Extract brand - usually capitalized words before lowercase product description
+            // ASOS titles follow: "Brand Name product description"
+            // Brand is capitalized, product description starts with lowercase
             let brandName = null;
             if (descriptionText) {
-                // Match brand: Capital letters, can include '&', spaces, multiple words
-                // Stops at first lowercase word or number
-                const brandMatch = descriptionText.match(/^([A-Z][A-Za-z]*(?:[\s&]+[A-Z][A-Za-z]*)*)/);
+                // Match only capitalized words, stop at first lowercase word
+                // This handles: "New Balance", "Polo Ralph Lauren", "ASOS DESIGN"
+                // But stops at: "Dune London Insight" -> "Dune London"
+                const brandMatch = descriptionText.match(/^([A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)*?)\s+[a-z]/);
                 if (brandMatch) {
                     brandName = brandMatch[1].trim();
+                } else {
+                    // Fallback: if entire title is capitalized (like "ASOS DESIGN")
+                    const fallbackMatch = descriptionText.match(/^([A-Z][A-Z\s&]+)/);
+                    if (fallbackMatch) {
+                        brandName = fallbackMatch[1].trim().split(/\s{2,}/)[0]; // Stop at double space
+                    }
                 }
             }
 
@@ -740,29 +765,44 @@ function parseDomProducts(html, $) {
             }
 
             // Try to extract color from title or aria-label
-            // Colors usually appear as "in [color]" at the end of titles
+            // Colors appear as "in [color]" but stop before extra descriptors
             let color = null;
             
             // First try from title/description
             if (title || descriptionText) {
                 const text = title || descriptionText;
-                // Match "in [color]" pattern (e.g., "in brown and white", "in black")
-                const colorMatch = text.match(/\s+in\s+([a-z][a-z\s/-]+?)(?:\s+(?:with|leather|suede|nubuck)|$)/i);
+                // Match "in [color]" but stop at common separators
+                const colorMatch = text.match(/\s+in\s+([a-z][a-z\s/-]+?)(?:\s+(?:with|Exclusive|nubuck|leather|suede|fabric|-|$)|$)/i);
                 if (colorMatch) {
                     color = colorMatch[1].trim();
+                    // Clean up: remove trailing material words
+                    color = color.replace(/\s+(leather|suede|nubuck|fabric|material|print|croc)$/i, '').trim();
                 }
             }
             
             // Fallback: try aria-label
             if (!color && ariaLabel) {
-                const colorMatch = ariaLabel.match(/\s+in\s+([a-z][a-z\s/-]+?)(?:,|\s+current|$)/i);
+                const colorMatch = ariaLabel.match(/\s+in\s+([a-z][a-z\s/-]+?)(?:,|\s+current|\s+with|$)/i);
                 if (colorMatch) {
                     color = colorMatch[1].trim();
+                    color = color.replace(/\s+(leather|suede|nubuck|fabric|material)$/i, '').trim();
                 }
             }
 
-            // Badge / Product Type
-            const badge = tile.find('div[class*="sellingFast"], span[class*="overlay"], div[class*="badge"]').text().trim() || null;
+            // Badge / Product Type - extract and clean up
+            const badgeElements = tile.find('div[class*="sellingFast"], span[class*="overlay"], div[class*="badge"], span[class*="badge"]');
+            let badges = [];
+            
+            badgeElements.each((idx, el) => {
+                const badgeText = $(el).text().trim();
+                if (badgeText && badgeText.length > 0) {
+                    badges.push(badgeText);
+                }
+            });
+            
+            // Clean and deduplicate badges
+            badges = [...new Set(badges)];
+            const badge = badges.length > 0 ? badges.join(' | ') : null;
 
             products.push({
                 id,
