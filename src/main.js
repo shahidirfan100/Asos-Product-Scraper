@@ -72,6 +72,9 @@ const crawler = new CheerioCrawler({
 
         if (!products.length) {
             log.warning(`No products found on ${request.url}`);
+            const fs = await import('fs/promises');
+            await fs.writeFile('debug.html', html);
+            log.info('Saved HTML to debug.html for inspection');
             return;
         }
 
