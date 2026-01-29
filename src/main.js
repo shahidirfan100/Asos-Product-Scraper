@@ -305,6 +305,10 @@ function parseJsonSafe(str) {
     }
 }
 
+function infoDivAttr(tile, link, attr) {
+    return tile.find('[class*="productInfo"]').attr(attr) || link.attr(attr) || '';
+}
+
 function parseDomProducts(html, $) {
     const products = [];
     const tiles = $('article, [data-testid="productTile"], li[class*="productTile"]');
