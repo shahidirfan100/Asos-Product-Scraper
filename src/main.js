@@ -62,6 +62,9 @@ const crawler = new CheerioCrawler({
         log.info(`Processing: ${request.url}`);
 
         // Prefer server-rendered data: window.asos -> __NEXT_DATA__ fallback
+        const title = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] || '';
+        log.info(`Page title: ${title}`);
+
         const windowAsos = extractWindowAsos(html);
         let products = getProductsFromWindow(windowAsos);
 
@@ -72,9 +75,17 @@ const crawler = new CheerioCrawler({
 
         if (!products.length) {
             log.warning(`No products found on ${request.url}`);
-            const fs = await import('fs/promises');
-            await fs.writeFile('debug.html', html);
-            log.info('Saved HTML to debug.html for inspection');
+
+            // Save to local file (if running locally)
+            try {
+                const fs = await import('fs/promises');
+                await fs.writeFile('debug.html', html);
+            } catch (e) { }
+
+            // Save to Apify Key-Value Store (visible in platform)
+            await Actor.setValue('DEBUG_HTML', html, { contentType: 'text/html' });
+            log.info('Saved HTML to Key-Value Store "DEBUG_HTML" for inspection');
+
             return;
         }
 
