@@ -105,12 +105,29 @@ log.info('Crawl finished.');
 await Actor.exit();
 
 function extractWindowAsos(html) {
-    const scriptRegex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+    // 1) Structured JSON payloads: <script data-id="window.asos..." type="application/json">{...}</script>
+    const dataIdRegex = /<script[^>]*data-id="window\.asos[^"]*"[^>]*>([\s\S]*?)<\/script>/gi;
     let match;
+    while ((match = dataIdRegex.exec(html)) !== null) {
+        const json = match[1]?.trim();
+        const parsed = parseJsonSafe(json);
+        if (parsed) return parsed;
+    }
+
+    // 2) Inline assignment: window.asos = {...}; (minified). Evaluate in vm but only after isolating the object literal
+    const scriptRegex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
     while ((match = scriptRegex.exec(html)) !== null) {
         const script = match[1];
         if (!script || !script.includes('window.asos')) continue;
 
+        // Extract JSON substring after first equals
+        const assignMatch = script.match(/window\.asos\s*=\s*(\{[\s\S]*?\});?/);
+        if (assignMatch?.[1]) {
+            const parsed = parseJsonSafe(assignMatch[1]);
+            if (parsed) return parsed;
+        }
+
+        // Fallback: evaluate inside sandbox
         const context = {
             result: null,
             document: {},
@@ -150,7 +167,9 @@ function getProductsFromWindow(data) {
         data.plp?.products ||
         data.plp?.results ||
         data.search?.products ||
+        data.search?.results ||
         data.props?.pageProps?.searchResults?.products ||
+        data.props?.pageProps?.plp?.products ||
         data.products ||
         []
     );
@@ -234,4 +253,19 @@ function normalizeProduct(p) {
         color: p.colour || p.colourWayLabel || null,
         badge: p.badges?.[0]?.text || p.productType || null,
     };
+}
+
+function parseJsonSafe(str) {
+    if (!str) return null;
+    try {
+        return JSON.parse(str);
+    } catch {
+        // Sometimes HTML entities break parsing; try a relaxed cleanup
+        const cleaned = str.replace(/&quot;/g, '"');
+        try {
+            return JSON.parse(cleaned);
+        } catch {
+            return null;
+        }
+    }
 }
