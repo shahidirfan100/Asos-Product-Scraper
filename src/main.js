@@ -42,6 +42,7 @@ const buildSearchUrl = (page = 1) => {
 
 const seenIds = new Set();
 let saved = 0;
+let shouldStop = false; // Global flag to stop crawling
 
 const productBuffer = [];
 const BATCH_SIZE = 10;
@@ -69,6 +70,12 @@ const crawler = new CheerioCrawler({
         },
     ],
     async requestHandler({ $, request, body, crawler: crawlerInstance }) {
+        // Check if we should stop processing
+        if (shouldStop || saved >= resultsWanted) {
+            log.info(`Already reached target of ${resultsWanted} products. Skipping request.`);
+            return;
+        }
+
         const { label } = request.userData;
 
         if (label === 'DETAIL') {
@@ -106,9 +113,18 @@ const crawler = new CheerioCrawler({
 
         // Filter and Enqueue Detail Pages
         const filtered = products.filter((p) => pricePasses(p.price, minPrice, maxPrice));
+        
+        // Only enqueue what we still need
+        const needed = resultsWanted - saved;
+        const toEnqueue = filtered.slice(0, needed);
 
-        for (const p of filtered) {
-            if (saved >= resultsWanted) break;
+        log.info(`Found ${filtered.length} products, enqueueing ${toEnqueue.length} (already have ${saved}/${resultsWanted})`);
+
+        for (const p of toEnqueue) {
+            if (saved >= resultsWanted) {
+                shouldStop = true;
+                break;
+            }
 
             // We need a unique ID to dedup. 
             // If we have a robust ID from listing, use it. Otherwise url is key.
@@ -130,17 +146,16 @@ const crawler = new CheerioCrawler({
             }
         }
 
-        // Listing Pagination
-        // Only if we haven't reached the limit (checked at save time usually, but here we enqueue detail pages)
-        // We'll check 'saved' increment inside handleDetail ideally, but since we are async, 
-        // we might over-crawl slightly. better to check globally or estimate.
-        if (saved < resultsWanted) {
+        // Listing Pagination - only if we still need more products
+        if (saved < resultsWanted && toEnqueue.length === filtered.length) {
             const pagination = extractPagination(windowAsos) || extractPaginationFromUrl(request.url);
             const nextUrl = nextPageUrl(request.url, pagination, products.length);
             if (nextUrl) {
                 log.info(`Enqueueing next page: ${nextUrl}`);
                 await crawlerInstance.addRequests([{ url: nextUrl }]);
             }
+        } else {
+            log.info(`Not enqueueing next page - have enough products or reached limit`);
         }
     },
 });
@@ -339,10 +354,12 @@ function parseDomProducts(html, $) {
             // Try explicit image selector first, then fallback
             const img = tile.find('img[class*="productImage"], img').first();
             let imageUrl = img.attr('src');
-            // Ensure high-res or clean URL
+            // Ensure high-res or clean URL and normalize
             if (imageUrl) {
                 // Remove width params to get cleaner image
                 imageUrl = imageUrl.split('?')[0];
+                // Normalize to ensure https:
+                imageUrl = normalizeImageUrl(imageUrl);
             }
 
             // Title & Brand
@@ -416,7 +433,12 @@ function parseDomProducts(html, $) {
 
 async function handleDetail($, request, body) {
     const html = body?.toString?.() || '';
-    if (saved >= resultsWanted) return;
+    
+    // Check if we've reached the limit
+    if (shouldStop || saved >= resultsWanted) {
+        log.info(`Already have ${saved} products, skipping ${request.url}`);
+        return;
+    }
 
     // 1. Try window.asos
     let windowAsos = extractWindowAsos(html);
@@ -484,24 +506,34 @@ async function handleDetail($, request, body) {
 
             const isMarkedDown = p.isMarkedDown || (previousPriceVal && currentPriceVal && previousPriceVal > currentPriceVal) || listingProduct.is_marked_down;
 
+            // Calculate discount percentage
+            let discount = null;
+            if (previousPriceVal && currentPriceVal && previousPriceVal > currentPriceVal) {
+                discount = `${Math.round(((previousPriceVal - currentPriceVal) / previousPriceVal) * 100)}%`;
+            }
+
+            // Format price with currency
+            const formattedPrice = currentPriceVal ? `${currency}${currentPriceVal.toFixed(2)}` : null;
+            const formattedOriginalPrice = previousPriceVal ? `${currency}${previousPriceVal.toFixed(2)}` : null;
+
+            // Format sizes - get available sizes only
+            const availableSizes = sizes.filter(s => s.is_in_stock).map(s => s.name).join(', ') || 'N/A';
+
             item = {
-                id,
+                product_id: id,
                 title,
-                url: request.url,
                 brand,
+                price: formattedPrice,
+                original_price: formattedOriginalPrice,
+                discount,
                 color,
-                price_current: currentPriceVal,
-                price_previous: previousPriceVal,
-                currency,
-                is_marked_down: isMarkedDown,
-                is_in_stock: p.isInStock ?? (sizes.length ? sizes.some(s => s.is_in_stock) : listingProduct.is_in_stock),
-                stock_status: sizes.map(s => `${s.name}: ${s.is_in_stock ? 'In Stock' : 'Out of Stock'}`),
+                size_available: availableSizes,
+                is_sale: isMarkedDown ? 'Yes' : 'No',
+                product_url: request.url,
+                // Additional fields for reference
                 image_url: imageUrl,
-                badge,
-                gender: p.gender,
-                sizes,
+                currency,
                 description: null, // Will fetch below
-                delivery_info: null // Will fetch below
             };
         } catch (e) {
             log.debug(`JSON extraction error on ${request.url}: ${e.message}`);
@@ -512,26 +544,56 @@ async function handleDetail($, request, body) {
     // Or if we want to enrich specific fields like description which are often DOM-only
     if (!item) {
         // Construct from Listing Product + DOM Fallback
-        item = { ...listingProduct, url: request.url };
-        // Try to scrape basic details from DOM if JSON failed entirely
-        // (You can expand this if needed, but listingProduct is a good baseline)
+        const priceVal = extractPriceValue(listingProduct.price);
+        const originalPriceVal = listingProduct.price?.previous?.value;
+        const curr = listingProduct.currency || '£';
+        
+        let discount = null;
+        if (originalPriceVal && priceVal && originalPriceVal > priceVal) {
+            discount = `${Math.round(((originalPriceVal - priceVal) / originalPriceVal) * 100)}%`;
+        }
+
+        item = {
+            product_id: String(listingProduct.id || ''),
+            title: listingProduct.name || listingProduct.title,
+            brand: listingProduct.brandName || listingProduct.brand,
+            price: priceVal ? `${curr}${priceVal.toFixed(2)}` : null,
+            original_price: originalPriceVal ? `${curr}${originalPriceVal.toFixed(2)}` : null,
+            discount,
+            color: listingProduct.colour || listingProduct.color,
+            size_available: 'Check website',
+            is_sale: listingProduct.isMarkedDown ? 'Yes' : 'No',
+            product_url: request.url,
+            image_url: normalizeImageUrl(listingProduct.imageUrl),
+            currency: curr,
+            description: null,
+        };
     }
 
-    // Always try to enrich with DOM for Description/Delivery if missing
-    // Selector: #productDescription
+    // Always try to enrich with DOM for Description if missing
     if (!item.description) {
         let productDetails = $('#productDescription').text().trim();
-        if (productDetails) item.description = productDetails.replace(/\s+/g, ' ');
+        if (productDetails) {
+            item.description = productDetails.replace(/\s+/g, ' ').substring(0, 500); // Limit length
+        }
     }
 
-    if (!item.delivery_info) {
-        const deliveryText = $('div:contains("Free Delivery"), span:contains("Free Delivery"), .delivery-returns').first().text().trim();
-        if (deliveryText) item.delivery_info = deliveryText;
-    }
+    if (item && item.product_id) {
+        // Final validation - ensure no undefined/null critical fields
+        if (!item.title || !item.product_url) {
+            log.warning(`Skipping product with missing critical data: ${request.url}`);
+            return;
+        }
 
-    if (item && item.id) {
         productBuffer.push(item);
         saved++;
+        
+        // Check if we've reached the limit
+        if (saved >= resultsWanted) {
+            shouldStop = true;
+            log.info(`Reached target of ${resultsWanted} products!`);
+        }
+        
         // Less verbose log
         if (saved % 10 === 0) log.info(`Saved ${saved} products`);
         await pushBufferedData();
