@@ -72,30 +72,42 @@ const crawler = new CheerioCrawler({
         log.info(`Processing: ${request.url}`);
 
         // 1. Extract data from window.asos
-        const scriptContent = $('script').map((i, el) => $(el).html()).get().find(s => s.includes('window.asos ='));
+        const html = $('body').html() || '';
+        log.info(`Page title: ${$('title').text()}`);
+
+        const scriptContent = $('script').map((i, el) => $(el).html()).get().find(s => s && s.includes('window.asos'));
 
         let products = [];
 
         if (scriptContent) {
             try {
-                // Extract the JSON object
-                const jsonStr = scriptContent.split('window.asos =')[1].split(';')[0].trim();
-                const asosData = JSON.parse(jsonStr);
+                // Use Regex to capture the JSON object - handles whitespace variations
+                const match = scriptContent.match(/window\.asos\s*=\s*(\{.+?\});/s);
+                if (match && match[1]) {
+                    const asosData = JSON.parse(match[1]);
 
-                // Navigate to products
-                // Structure varies, usually plp.products or search.products
-                const plpProducts = asosData.plp?.products ||
-                    asosData.search?.products ||
-                    asosData.plp?.results ||
-                    [];
+                    // Navigate to products
+                    const plpProducts = asosData.plp?.products ||
+                        asosData.search?.products ||
+                        asosData.plp?.results ||
+                        [];
 
-                if (plpProducts.length > 0) {
-                    products = plpProducts;
-                    log.info(`Found ${products.length} products in window.asos`);
+                    if (plpProducts.length > 0) {
+                        products = plpProducts;
+                        log.info(`Found ${products.length} products in window.asos`);
+                    } else {
+                        log.warning('window.asos found but no products in plp.products/search.products');
+                        log.debug('ASOS Keys:', Object.keys(asosData));
+                        if (asosData.plp) log.debug('PLP Keys:', Object.keys(asosData.plp));
+                    }
+                } else {
+                    log.warning('Could not regex match window.asos JSON');
                 }
             } catch (e) {
                 log.warning(`Failed to parse window.asos: ${e.message}`);
             }
+        } else {
+            log.warning('"window.asos" script tag not found.');
         }
 
         // Fallback: If window.asos failed or was empty, check __NEXT_DATA__
