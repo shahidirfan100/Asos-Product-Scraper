@@ -40,13 +40,9 @@ Track product availability and stock levels across categories. Monitor what sell
 |-----------|------|----------|---------|-------------|
 | `keyword` | String | No | `"men"` | Search term to find products |
 | `startUrl` | String | No | — | Direct ASOS search or category URL |
-| `categoryId` | String | No | — | ASOS category ID to filter results |
 | `minPrice` | Number | No | — | Minimum product price |
 | `maxPrice` | Number | No | — | Maximum product price |
 | `sortBy` | String | No | `"pricedesc"` | Sort order: `pricedesc`, `priceasc`, `freshness` |
-| `sizeFilter` | String | No | — | Filter by size (e.g., 'S', 'M', 'L', 'XL') |
-| `colorFilter` | String | No | — | Filter by color ID |
-| `brandFilter` | String | No | — | Filter by brand ID |
 | `results_wanted` | Integer | No | `20` | Maximum number of products to collect |
 | `proxyConfiguration` | Object | No | Residential | Proxy settings for requests |
 
@@ -130,7 +126,6 @@ Search for products in a specific size:
 ```json
 {
     "keyword": "shirts",
-    "sizeFilter": "M",
     "results_wanted": 50
 }
 ```
@@ -177,8 +172,6 @@ Search for products in a specific size:
 - Filter by category or brand when available for focused results
 
 ### Filter by Size and Color
-- Use size filters to focus on specific size ranges
-- Combine color and size filters for precise targeting
 - Check stock availability with the `size_available` field
 
 ### Proxy Configuration
@@ -251,16 +244,13 @@ You can collect thousands of products per run. The practical limit depends on yo
 Each run fetches real-time data directly from ASOS. Schedule regular runs to keep your data fresh and track price changes.
 
 ### Can I search specific categories?
-Yes, use the `categoryId` parameter with a category ID, or provide a direct category URL in the `startUrl` field.
+Yes, provide a direct category URL in the `startUrl` field.
 
 ### What if some fields are empty?
 Product listings vary in completeness. Some products may not have sale prices or may be out of stock. The scraper extracts all available data for each product.
 
 ### How do I get more products?
 Use broader keyword terms, remove filters, or set a higher `results_wanted` value. You can also run multiple searches with different parameters.
-
-### Can I filter by multiple sizes?
-Currently, the scraper supports single size filter per run. To get multiple sizes, run separate searches for each size requirement.
 
 ### Does this scrape product details pages?
 This scraper focuses on search/catalog results. For detailed product information (full descriptions, all images, sizing charts), consider using a dedicated product detail scraper.

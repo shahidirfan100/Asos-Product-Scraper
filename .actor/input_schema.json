@@ -18,12 +18,6 @@
             "editor": "textfield",
             "prefill": "men"
         },
-        "categoryId": {
-            "title": "Category ID",
-            "type": "string",
-            "description": "ASOS category ID to filter results (optional).",
-            "editor": "textfield"
-        },
         "minPrice": {
             "title": "Minimum Price",
             "type": "number",
@@ -54,24 +48,6 @@
                 "Newest"
             ],
             "default": "pricedesc"
-        },
-        "sizeFilter": {
-            "title": "Size Filter",
-            "type": "string",
-            "description": "Filter by size (e.g., 'S', 'M', 'L', 'XL').",
-            "editor": "textfield"
-        },
-        "colorFilter": {
-            "title": "Color Filter",
-            "type": "string",
-            "description": "Filter by color ID.",
-            "editor": "textfield"
-        },
-        "brandFilter": {
-            "title": "Brand Filter",
-            "type": "string",
-            "description": "Filter by brand ID.",
-            "editor": "textfield"
         },
         "results_wanted": {
             "title": "Results Wanted",

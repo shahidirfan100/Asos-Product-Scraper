@@ -2,6 +2,7 @@
 // ASOS Product Scraper - Cheerio implementation
 import { CheerioCrawler, Dataset } from 'crawlee';
 import { Actor, log } from 'apify';
+import { gotScraping } from 'got-scraping';
 
 await Actor.init();
 
@@ -9,14 +10,10 @@ const input = (await Actor.getInput()) || {};
 const {
     keyword = 'men',
     startUrl,
-    categoryId,
     // filters
     minPrice,
     maxPrice,
     sortBy = 'pricedesc',
-    sizeFilter,
-    colorFilter,
-    brandFilter,
     results_wanted: RESULTS_WANTED_RAW = 20,
     proxyConfiguration: proxyConfig,
 } = input;
@@ -35,12 +32,7 @@ const buildSearchUrl = (kw, offset = 0) => {
     // Ideally, we start with a known URL.
 
     // If we have to construct one from keywords, it's harder.
-    // We'll trust 'startUrl' or 'categoryId' mostly.
-
-    if (categoryId) {
-        // Typical ASOS PLP URL for category
-        return `https://www.asos.com/men/new-in/cat/?cid=${categoryId}&page=${Math.floor(offset / 72) + 1}`;
-    }
+    // We'll trust 'startUrl' mostly.
 
     // Fallback: search page
     return `https://www.asos.com/search/?q=${encodeURIComponent(kw)}&page=${Math.floor(offset / 72) + 1}`;
@@ -72,6 +64,13 @@ const crawler = new CheerioCrawler({
     // ASOS is tough, limit concurrency
     maxConcurrency: 2,
     requestHandlerTimeoutSecs: 60,
+    ignoreSslErrors: true,
+    headerGeneratorOptions: {
+        browsers: [{ name: 'chrome', minVersion: 110 }],
+        devices: ['desktop'],
+        locales: ['en-US'],
+        operatingSystems: ['windows'],
+    },
 
     async requestHandler({ $, request, crawler: crawlerInstance, body }) {
         const offset = request.userData?.offset || 0;
@@ -180,17 +179,13 @@ const crawler = new CheerioCrawler({
         }
     },
 
-    validateStatus(status) {
-        return status === 200 || status === 404;
-    },
+
 });
 
 // Determine start URLs
 const urls = [];
 if (startUrl) {
     urls.push(startUrl);
-} else if (categoryId) {
-    urls.push(buildSearchUrl('', 0));
 } else {
     // Default fallback
     urls.push(buildSearchUrl(keyword, 0));
