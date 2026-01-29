@@ -111,7 +111,7 @@ const crawler = new CheerioCrawler({
             }
 
             if (productUrl) {
-                log.info(`Enqueueing detail: ${productUrl}`);
+                log.debug(`Enqueueing detail: ${productUrl}`);
                 await crawlerInstance.addRequests([{
                     url: productUrl,
                     userData: { label: 'DETAIL', listingProduct: p } // Pass listing data as backup
@@ -137,6 +137,7 @@ const crawler = new CheerioCrawler({
 await crawler.run([startUrl || buildSearchUrl(1)]);
 
 log.info('Crawl finished.');
+await pushBufferedData(true);
 await Actor.exit();
 
 function extractWindowAsos(html) {
@@ -400,120 +401,140 @@ function parseDomProducts(html, $) {
     return products;
 }
 
+const productBuffer = [];
+const BATCH_SIZE = 10;
+
+async function pushBufferedData(force = false) {
+    if (productBuffer.length >= BATCH_SIZE || (force && productBuffer.length > 0)) {
+        await Dataset.pushData(productBuffer);
+        log.info(`Flushed ${productBuffer.length} products to dataset.`);
+        productBuffer.length = 0;
+    }
+}
+
 async function handleDetail($, request, body) {
     const html = body?.toString?.() || '';
     if (saved >= resultsWanted) return;
 
-    // Extract window.asos which contains pdp data
-    const windowAsos = extractWindowAsos(html);
-    const pdp = windowAsos?.pdp;
+    // 1. Try window.asos
+    let windowAsos = extractWindowAsos(html);
+    let pdp = windowAsos?.pdp;
+
+    // 2. Try __NEXT_DATA__ if window.asos is missing (Layout difference)
+    if (!pdp) {
+        const nextData = extractNextData(html);
+        if (nextData?.props?.pageProps?.initialStoreConfig) {
+            // Sometimes data is here, but often specific product data is deep
+            // In Next.js ASOS, often verify: nextData.props.pageProps.product
+            pdp = { product: nextData.props.pageProps.product, config: nextData.props.pageProps };
+        }
+    }
 
     // Backup: Listing data passed via userData
     const listingProduct = request.userData.listingProduct || {};
 
-    if (!pdp) {
-        log.warning(`PDP data missing on ${request.url}`);
-        await Actor.setValue(`DEBUG_PDP_${Math.random()}`, html, { contentType: 'text/html' });
-        return;
+    // Fallback variables
+    let item = null;
+
+    if (pdp && (pdp.product || pdp.config?.product)) {
+        try {
+            const p = pdp.config?.product || pdp.product || {};
+            const config = pdp.config || {};
+
+            // Resolving Price
+            let priceData = null;
+            if (config.stockPriceResponse) {
+                try {
+                    const stockPrice = JSON.parse(config.stockPriceResponse);
+                    if (Array.isArray(stockPrice)) priceData = stockPrice[0]?.productPrice;
+                } catch (e) { }
+            }
+            if (!priceData) priceData = p.price;
+
+            const variants = p.variants || [];
+            const firstVariant = variants[0] || {};
+
+            const id = String(p.id || p.productCode || listingProduct.id || '');
+            const title = p.name || listingProduct.title;
+            const brand = p.brandName || listingProduct.brand;
+            const images = p.images || [];
+            const imageUrl = images[0]?.url ? normalizeImageUrl(images[0].url) : normalizeImageUrl(listingProduct.imageUrl);
+
+            const sizes = variants.map(v => ({
+                id: v.variantId,
+                name: v.size,
+                is_in_stock: v.isInStock,
+                sku: v.sku
+            }));
+
+            const currency = priceData?.currency || config.currency || 'GBP';
+            const currentPriceVal = priceData?.current?.value ?? listingProduct.price_value;
+            const previousPriceVal = priceData?.previous?.value || priceData?.rrp?.value || listingProduct.original_price_value;
+
+            const color = firstVariant.colour || p.colour || listingProduct.color;
+
+            let badge = null;
+            if (p.badges && p.badges.length > 0) {
+                badge = p.badges.map(b => b.label || b.text).join(', ');
+            } else {
+                badge = listingProduct.badge;
+            }
+
+            const isMarkedDown = p.isMarkedDown || (previousPriceVal && currentPriceVal && previousPriceVal > currentPriceVal) || listingProduct.is_marked_down;
+
+            item = {
+                id,
+                title,
+                url: request.url,
+                brand,
+                color,
+                price_current: currentPriceVal,
+                price_previous: previousPriceVal,
+                currency,
+                is_marked_down: isMarkedDown,
+                is_in_stock: p.isInStock ?? (sizes.length ? sizes.some(s => s.is_in_stock) : listingProduct.is_in_stock),
+                stock_status: sizes.map(s => `${s.name}: ${s.is_in_stock ? 'In Stock' : 'Out of Stock'}`),
+                image_url: imageUrl,
+                badge,
+                gender: p.gender,
+                sizes,
+                description: null, // Will fetch below
+                delivery_info: null // Will fetch below
+            };
+        } catch (e) {
+            log.debug(`JSON extraction error on ${request.url}: ${e.message}`);
+        }
     }
 
-    try {
-        // Data is often in pdp.config.product OR pdp.product depending on the page version
-        // Browser inspection showed window.asos.pdp.config.product
-        const p = pdp.config?.product || pdp.product || {};
-        const config = pdp.config || {};
+    // fallback to DOM if we have partial or no item
+    // Or if we want to enrich specific fields like description which are often DOM-only
+    if (!item) {
+        // Construct from Listing Product + DOM Fallback
+        item = { ...listingProduct, url: request.url };
+        // Try to scrape basic details from DOM if JSON failed entirely
+        // (You can expand this if needed, but listingProduct is a good baseline)
+    }
 
-        // Prices
-        // stockPriceResponse is a string containing JSON with price info
-        let priceData = null;
-        if (config.stockPriceResponse) {
-            try {
-                const stockPrice = JSON.parse(config.stockPriceResponse);
-                // Assuming single product/variant price or taking the first
-                // usually structure is [ { price: { current: ... } } ] or similar
-                // Let's rely on the simpler p.price if stockPriceResponse is complex, 
-                // but typically p.price is missing in the new layout.
-                // Actually, inspection said: stockPriceResponse includes current, previous.
-                // Let's try to map it.
-                if (Array.isArray(stockPrice)) {
-                    priceData = stockPrice[0]?.productPrice;
-                }
-            } catch (e) { }
-        }
-
-        // Fallback to direct price object if parsing failed or missing
-        if (!priceData) priceData = p.price;
-
-        const variants = p.variants || [];
-        const firstVariant = variants[0] || {};
-
-        const id = String(p.id || p.productCode || '');
-        const title = p.name;
-        const brand = p.brandName;
-        const gender = p.gender;
-        const images = p.images || [];
-        const imageUrl = images[0]?.url ? normalizeImageUrl(images[0].url) : normalizeImageUrl(listingProduct.imageUrl);
-
-        // Sizes mapping
-        const sizes = variants.map(v => ({
-            id: v.variantId,
-            name: v.size,
-            is_in_stock: v.isInStock,
-            sku: v.sku
-        }));
-
-        // Currency
-        const currency = priceData?.currency || config.currency || 'GBP';
-        const currentPriceVal = priceData?.current?.value;
-        const previousPriceVal = priceData?.previous?.value || priceData?.rrp?.value;
-
-        const color = firstVariant.colour || p.colour || listingProduct.color;
-
-        // Badges
-        let badge = null;
-        if (p.badges && p.badges.length > 0) {
-            badge = p.badges.map(b => b.label || b.text).join(', ');
-        }
-
-        const isMarkedDown = p.isMarkedDown || (previousPriceVal && currentPriceVal && previousPriceVal > currentPriceVal);
-
-        // Product Details (DOM parsing as per inspection)
-        // Selector: #productDescription
+    // Always try to enrich with DOM for Description/Delivery if missing
+    // Selector: #productDescription
+    if (!item.description) {
         let productDetails = $('#productDescription').text().trim();
-        // Cleanup formatting
-        if (productDetails) {
-            productDetails = productDetails.replace(/\s+/g, ' ');
-        }
+        if (productDetails) item.description = productDetails.replace(/\s+/g, ' ');
+    }
 
-        // Delivery Info
-        // Look for generic delivery text or checking specific elements
-        const deliveryText = $('div:contains("Free Delivery"), span:contains("Free Delivery"), .delivery-returns').first().text().trim() || null;
+    if (!item.delivery_info) {
+        const deliveryText = $('div:contains("Free Delivery"), span:contains("Free Delivery"), .delivery-returns').first().text().trim();
+        if (deliveryText) item.delivery_info = deliveryText;
+    }
 
-        const item = {
-            id,
-            title,
-            url: request.url,
-            brand,
-            color,
-            price_current: currentPriceVal,
-            price_previous: previousPriceVal,
-            currency,
-            is_marked_down: isMarkedDown,
-            is_in_stock: p.isInStock ?? (sizes.some(s => s.is_in_stock)),
-            stock_status: sizes.map(s => `${s.name}: ${s.is_in_stock ? 'In Stock' : 'Out of Stock'}`),
-            image_url: imageUrl,
-            badge,
-            gender,
-            sizes,
-            description: productDetails,
-            delivery_info: deliveryText
-        };
-
-        await Dataset.pushData(item);
+    if (item && item.id) {
+        productBuffer.push(item);
         saved++;
-        log.info(`Saved product: ${title} (${saved}/${resultsWanted})`);
-
-    } catch (e) {
-        log.error(`Failed to extract detail for ${request.url}: ${e.message}`);
+        // Less verbose log
+        if (saved % 10 === 0) log.info(`Saved ${saved} products`);
+        await pushBufferedData();
+    } else {
+        log.debug(`Could not extract valid product from ${request.url}`);
+        await Actor.setValue(`DEBUG_FAIL_${Math.random()}`, html, { contentType: 'text/html' });
     }
 }
