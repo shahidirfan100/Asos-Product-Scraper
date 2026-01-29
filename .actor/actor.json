@@ -1,0 +1,18 @@
+{
+    "actorSpecification": 1,
+    "name": "asos-product-scraper",
+    "version": "1.0.0",
+    "buildTag": "latest",
+    "dockerfile": "../Dockerfile",
+    "readme": "../README.md",
+    "input": "./input_schema.json",
+    "output": "./output_schema.json",
+    "nodeJsVersion": "22",
+    "storages": {
+        "dataset": "./dataset_schema.json"
+    },
+    "meta": {
+        "templateId": "js-playwright-firefox",
+        "generatedBy": "claude-sonnet-4.5"
+    }
+}

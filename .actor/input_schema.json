@@ -1,0 +1,100 @@
+{
+    "title": "ASOS Product Scraper",
+    "description": "Extract product listings from ASOS. Search by keyword or use a direct URL. Get product details including prices, brands, colors, sizes, and images.",
+    "type": "object",
+    "schemaVersion": 1,
+    "properties": {
+        "startUrl": {
+            "title": "Start URL",
+            "type": "string",
+            "description": "Direct ASOS search or category URL. If provided, overrides keyword search.",
+            "editor": "textfield",
+            "example": "https://www.asos.com/men/ctas/curated-category-3/cat/?cid=51451"
+        },
+        "keyword": {
+            "title": "Search Keyword",
+            "type": "string",
+            "description": "Product search term (e.g., 'men shoes', 'women dresses', 'jackets').",
+            "editor": "textfield",
+            "prefill": "men"
+        },
+        "categoryId": {
+            "title": "Category ID",
+            "type": "string",
+            "description": "ASOS category ID to filter results (optional).",
+            "editor": "textfield"
+        },
+        "minPrice": {
+            "title": "Minimum Price",
+            "type": "number",
+            "description": "Filter products with price greater than or equal to this value.",
+            "editor": "number",
+            "minimum": 0
+        },
+        "maxPrice": {
+            "title": "Maximum Price",
+            "type": "number",
+            "description": "Filter products with price less than or equal to this value.",
+            "editor": "number",
+            "minimum": 0
+        },
+        "sortBy": {
+            "title": "Sort By",
+            "type": "string",
+            "description": "Sort order for search results.",
+            "editor": "select",
+            "enum": [
+                "pricedesc",
+                "priceasc",
+                "freshness"
+            ],
+            "enumTitles": [
+                "Price: High to Low",
+                "Price: Low to High",
+                "Newest"
+            ],
+            "default": "pricedesc"
+        },
+        "sizeFilter": {
+            "title": "Size Filter",
+            "type": "string",
+            "description": "Filter by size (e.g., 'S', 'M', 'L', 'XL').",
+            "editor": "textfield"
+        },
+        "colorFilter": {
+            "title": "Color Filter",
+            "type": "string",
+            "description": "Filter by color ID.",
+            "editor": "textfield"
+        },
+        "brandFilter": {
+            "title": "Brand Filter",
+            "type": "string",
+            "description": "Filter by brand ID.",
+            "editor": "textfield"
+        },
+        "results_wanted": {
+            "title": "Results Wanted",
+            "type": "integer",
+            "description": "Maximum number of products to collect.",
+            "minimum": 1,
+            "default": 20,
+            "prefill": 20,
+            "editor": "number"
+        },
+        "proxyConfiguration": {
+            "title": "Proxy Configuration",
+            "type": "object",
+            "description": "Proxy settings. Residential proxies recommended for ASOS.",
+            "editor": "proxy",
+            "default": {
+                "useApifyProxy": true,
+                "apifyProxyGroups": [
+                    "RESIDENTIAL"
+                ]
+            }
+        }
+    },
+    "required": [],
+    "additionalProperties": false
+}
