@@ -667,15 +667,22 @@ function parseDomProducts(html, $) {
             const idMatch = href.match(/\/prd\/(\d+)/i) || href.match(/\/grp\/(\d+)/i);
             const id = idMatch ? idMatch[1] : `dom-${i}`;
 
-            // Image
-            // Try explicit image selector first, then fallback
+            // Image - try multiple attributes for best quality
             const img = tile.find('img[class*="productImage"], img').first();
-            let imageUrl = img.attr('src');
-            // Ensure high-res or clean URL and normalize
+            let imageUrl = img.attr('src') || img.attr('data-src') || img.attr('srcset')?.split(',')[0]?.split(' ')[0];
+            
+            // If srcset, get the highest quality version
+            if (!imageUrl || imageUrl.includes('placeholder')) {
+                const srcset = img.attr('srcset');
+                if (srcset) {
+                    // Get last (highest quality) image from srcset
+                    const srcsetImages = srcset.split(',').map(s => s.trim().split(' ')[0]);
+                    imageUrl = srcsetImages[srcsetImages.length - 1] || srcsetImages[0];
+                }
+            }
+            
+            // Normalize and ensure proper format
             if (imageUrl) {
-                // Remove width params to get cleaner image
-                imageUrl = imageUrl.split('?')[0];
-                // Normalize to ensure https:
                 imageUrl = normalizeImageUrl(imageUrl);
             }
 
@@ -685,14 +692,15 @@ function parseDomProducts(html, $) {
             const ariaLabel = infoDivAttr(tile, link, 'aria-label');
 
             // Try to extract brand from title
-            // ASOS titles often follow pattern: "Brand Name Product Name"
-            // Extract brand by looking for known patterns or first part before product description
+            // ASOS titles follow pattern: "Brand Name product description"
+            // Extract brand - usually capitalized words before lowercase product description
             let brandName = null;
             if (descriptionText) {
-                // Common brand patterns - first word/phrase is often the brand
-                const brandMatch = descriptionText.match(/^([A-Z][a-z]+(?:\s+[A-Z&]+)*)/);
+                // Match brand: Capital letters, can include '&', spaces, multiple words
+                // Stops at first lowercase word or number
+                const brandMatch = descriptionText.match(/^([A-Z][A-Za-z]*(?:[\s&]+[A-Z][A-Za-z]*)*)/);
                 if (brandMatch) {
-                    brandName = brandMatch[1];
+                    brandName = brandMatch[1].trim();
                 }
             }
 
@@ -731,12 +739,26 @@ function parseDomProducts(html, $) {
                 if (currencyMatch) currency = currencyMatch[0];
             }
 
-            // Try to extract color from URL or aria-label
+            // Try to extract color from title or aria-label
+            // Colors usually appear as "in [color]" at the end of titles
             let color = null;
-            const colorMatch = href.match(/colourWayId[-=](\d+)/i) || 
-                               ariaLabel?.match(/in\s+([a-z\s]+)$/i);
-            if (colorMatch) {
-                color = colorMatch[1];
+            
+            // First try from title/description
+            if (title || descriptionText) {
+                const text = title || descriptionText;
+                // Match "in [color]" pattern (e.g., "in brown and white", "in black")
+                const colorMatch = text.match(/\s+in\s+([a-z][a-z\s/-]+?)(?:\s+(?:with|leather|suede|nubuck)|$)/i);
+                if (colorMatch) {
+                    color = colorMatch[1].trim();
+                }
+            }
+            
+            // Fallback: try aria-label
+            if (!color && ariaLabel) {
+                const colorMatch = ariaLabel.match(/\s+in\s+([a-z][a-z\s/-]+?)(?:,|\s+current|$)/i);
+                if (colorMatch) {
+                    color = colorMatch[1].trim();
+                }
             }
 
             // Badge / Product Type
