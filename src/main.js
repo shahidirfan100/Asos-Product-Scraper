@@ -57,7 +57,7 @@ const crawler = new CheerioCrawler({
             request.headers = { ...headers, ...request.headers };
         },
     ],
-    async requestHandler({ request, body, crawler: crawlerInstance }) {
+    async requestHandler({ $, request, body, crawler: crawlerInstance }) {
         const html = body?.toString?.() || '';
         log.info(`Processing: ${request.url}`);
 
