@@ -1,8 +1,8 @@
-
-// ASOS Product Scraper - Cheerio implementation
-import { CheerioCrawler, Dataset } from 'crawlee';
+// ASOS Product Scraper - robust SSR window.asos extractor (Cheerio + sandboxed JS eval)
 import { Actor, log } from 'apify';
-import { gotScraping } from 'got-scraping';
+import { CheerioCrawler, Dataset } from 'crawlee';
+import { HeaderGenerator } from 'header-generator';
+import vm from 'node:vm';
 
 await Actor.init();
 
@@ -10,194 +10,228 @@ const input = (await Actor.getInput()) || {};
 const {
     keyword = 'men',
     startUrl,
-    // filters
     minPrice,
     maxPrice,
     sortBy = 'pricedesc',
-    results_wanted: RESULTS_WANTED_RAW = 20,
-    proxyConfiguration: proxyConfig,
+    results_wanted: resultsWantedRaw = 20,
+    proxyConfiguration: proxyInput,
 } = input;
 
-const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 20;
+const resultsWanted = Number.isFinite(+resultsWantedRaw) ? Math.max(1, +resultsWantedRaw) : 20;
 
-log.info(`Starting ASOS scraper for keyword: "${keyword}", results wanted: ${RESULTS_WANTED}`);
+log.info(`Starting ASOS scraper for keyword: "${keyword}", results wanted: ${resultsWanted}`);
 
-// Helper to build search URL
-const buildSearchUrl = (kw, offset = 0) => {
-    // Note: ASOS often redirects standard category URLs. 
-    // We observe from research that fetching product data is best done via
-    // the API-like structure or by hitting the PLP (Product Listing Page) and parsing window.asos.
-    // However, finding the right PLP URL for a query is tricky without a search step.
-    // For specific categories, we use the category ID.
-    // Ideally, we start with a known URL.
-
-    // If we have to construct one from keywords, it's harder.
-    // We'll trust 'startUrl' mostly.
-
-    // Fallback: search page
-    return `https://www.asos.com/search/?q=${encodeURIComponent(kw)}&page=${Math.floor(offset / 72) + 1}`;
-};
-
-const normalizeImageUrl = (url) => {
-    if (!url) return null;
-    let cleanUrl = url.startsWith('//') ? `https:${url}` : url;
-    if (!cleanUrl.startsWith('http')) cleanUrl = `https://images.asos-media.com/products/${url}`;
-    return cleanUrl.split('?')[0];
-};
-
-const proxyConfiguration = await Actor.createProxyConfiguration(proxyConfig || {
-    useApifyProxy: true,
-    apifyProxyGroups: ['RESIDENTIAL'],
+const headerGenerator = new HeaderGenerator({
+    browsers: [{ name: 'chrome', minVersion: 120, httpVersion: '2' }],
+    devices: ['desktop'],
+    operatingSystems: ['windows'],
+    locales: ['en-US'],
 });
 
-let saved = 0;
+const proxyConfiguration = await Actor.createProxyConfiguration(
+    proxyInput || { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] },
+);
+
+const buildSearchUrl = (page = 1) => {
+    const url = new URL('https://www.asos.com/search/');
+    url.searchParams.set('q', keyword);
+    url.searchParams.set('page', String(page));
+    if (sortBy) url.searchParams.set('sort', sortBy);
+    return url.toString();
+};
+
 const seenIds = new Set();
+let saved = 0;
 
 const crawler = new CheerioCrawler({
     proxyConfiguration,
-    maxRequestRetries: 3,
+    maxRequestRetries: 2,
+    maxConcurrency: 3,
+    requestHandlerTimeoutSecs: 80,
     useSessionPool: true,
-    sessionPoolOptions: {
-        maxPoolSize: 5,
-        sessionOptions: { maxUsageCount: 5 },
-    },
-    // ASOS is tough, limit concurrency
-    maxConcurrency: 2,
-    requestHandlerTimeoutSecs: 60,
-    ignoreSslErrors: true,
-
-
-    async requestHandler({ $, request, crawler: crawlerInstance, body }) {
-        const offset = request.userData?.offset || 0;
+    sessionPoolOptions: { maxPoolSize: 10, sessionOptions: { maxUsageCount: 10 } },
+    additionalMimeTypes: ['text/html'],
+    preNavigationHooks: [
+        async ({ request }) => {
+            const headers = headerGenerator.getHeaders();
+            request.headers = { ...headers, ...request.headers };
+        },
+    ],
+    async requestHandler({ request, body, crawler: crawlerInstance }) {
+        const html = body?.toString?.() || '';
         log.info(`Processing: ${request.url}`);
 
-        // 1. Extract data from window.asos
-        const html = $('body').html() || '';
-        log.info(`Page title: ${$('title').text()}`);
+        // Prefer server-rendered data: window.asos -> __NEXT_DATA__ fallback
+        const windowAsos = extractWindowAsos(html);
+        let products = getProductsFromWindow(windowAsos);
 
-        const scriptContent = $('script').map((i, el) => $(el).html()).get().find(s => s && s.includes('window.asos'));
-
-        let products = [];
-
-        if (scriptContent) {
-            try {
-                // Use Regex to capture the JSON object - handles whitespace variations
-                const match = scriptContent.match(/window\.asos\s*=\s*(\{.+?\});/s);
-                if (match && match[1]) {
-                    const asosData = JSON.parse(match[1]);
-
-                    // Navigate to products
-                    const plpProducts = asosData.plp?.products ||
-                        asosData.search?.products ||
-                        asosData.plp?.results ||
-                        [];
-
-                    if (plpProducts.length > 0) {
-                        products = plpProducts;
-                        log.info(`Found ${products.length} products in window.asos`);
-                    } else {
-                        log.warning('window.asos found but no products in plp.products/search.products');
-                        log.debug('ASOS Keys:', Object.keys(asosData));
-                        if (asosData.plp) log.debug('PLP Keys:', Object.keys(asosData.plp));
-                    }
-                } else {
-                    log.warning('Could not regex match window.asos JSON');
-                }
-            } catch (e) {
-                log.warning(`Failed to parse window.asos: ${e.message}`);
-            }
-        } else {
-            log.warning('"window.asos" script tag not found.');
+        if (!products.length) {
+            const nextData = extractNextData(html);
+            products = getProductsFromWindow(nextData);
         }
 
-        // Fallback: If window.asos failed or was empty, check __NEXT_DATA__
-        if (products.length === 0) {
-            const nextDataScript = $('#__NEXT_DATA__').html();
-            if (nextDataScript) {
-                try {
-                    const nextData = JSON.parse(nextDataScript);
-                    const p1 = nextData.props?.pageProps?.searchResults?.products;
-                    const p2 = nextData.props?.pageProps?.products;
-                    if (p1) products = p1;
-                    else if (p2) products = p2;
-                } catch (e) {
-                    log.warning(`Failed to parse __NEXT_DATA__: ${e.message}`);
-                }
-            }
+        if (!products.length) {
+            log.warning(`No products found on ${request.url}`);
+            return;
         }
 
-        // Process products
-        const normalizedProducts = [];
-        for (const p of products) {
-            if (!p || !p.id) continue;
+        const filtered = products.filter((p) => pricePasses(p.price, minPrice, maxPrice));
+        const pagination = extractPagination(windowAsos) || extractPaginationFromUrl(request.url);
 
-            // Map ASOS data to schema
-            const product = {
-                product_id: String(p.id),
-                title: p.name,
-                price: p.price?.current?.text || p.price?.current?.value,
-                currency: p.price?.currency?.text,
-                brand: p.brandName,
-                url: p.url ? `https://www.asos.com${p.url}` : `https://www.asos.com/prd/${p.id}`,
-                image_url: normalizeImageUrl(p.imageUrl || p.images?.[0]?.url),
-                is_in_stock: p.isNoSize ? false : (p.isInStock !== false),
-                discount: p.price?.isMarkedDown ? 'Yes' : 'No',
-            };
-            normalizedProducts.push(product);
+        for (const product of filtered) {
+            if (saved >= resultsWanted) break;
+            const normalized = normalizeProduct(product);
+            if (!normalized.id || seenIds.has(normalized.id)) continue;
+            seenIds.add(normalized.id);
+            await Dataset.pushData({ ...normalized, source_url: request.url });
+            saved++;
         }
 
-        // Save
-        for (const p of normalizedProducts) {
-            if (saved >= RESULTS_WANTED) break;
-            if (!seenIds.has(p.product_id)) {
-                seenIds.add(p.product_id);
-                await Dataset.pushData(p);
-                saved++;
-            }
-        }
+        log.info(`Saved ${saved}/${resultsWanted} products so far.`);
 
-        log.info(`Saved ${saved}/${RESULTS_WANTED} products so far.`);
+        if (saved >= resultsWanted) return;
 
-        // Pagination
-        // We calculate next page based on offset or just increment page number if using page param
-        if (saved < RESULTS_WANTED && products.length > 0) {
-            // ASOS standard page size is 72, or we can check header info
-            if (request.url.includes('page=')) {
-                const currentUrl = new URL(request.url);
-                const currentPage = parseInt(currentUrl.searchParams.get('page') || '1');
-                const nextPage = currentPage + 1;
-                currentUrl.searchParams.set('page', String(nextPage));
-
-                log.info(`Enqueueing next page: ${nextPage}`);
-                await crawlerInstance.addRequests([{
-                    url: currentUrl.href,
-                    userData: { offset: offset + products.length }
-                }]);
-            } else {
-                // If existing URL didn't have page, add page=2
-                const currentUrl = new URL(request.url);
-                currentUrl.searchParams.set('page', '2');
-                log.info(`Enqueueing page 2`);
-                await crawlerInstance.addRequests([{
-                    url: currentUrl.href,
-                    userData: { offset: offset + products.length }
-                }]);
-            }
+        const nextUrl = nextPageUrl(request.url, pagination, products.length);
+        if (nextUrl) {
+            log.info(`Enqueueing next page: ${nextUrl}`);
+            await crawlerInstance.addRequests([{ url: nextUrl }]);
         }
     },
-
-
 });
 
-// Determine start URLs
-const urls = [];
-if (startUrl) {
-    urls.push(startUrl);
-} else {
-    // Default fallback
-    urls.push(buildSearchUrl(keyword, 0));
+await crawler.run([startUrl || buildSearchUrl(1)]);
+
+log.info('Crawl finished.');
+await Actor.exit();
+
+function extractWindowAsos(html) {
+    const scriptRegex = /<script\b[^>]*>([\s\S]*?)<\/script>/gi;
+    let match;
+    while ((match = scriptRegex.exec(html)) !== null) {
+        const script = match[1];
+        if (!script || !script.includes('window.asos')) continue;
+
+        const context = {
+            result: null,
+            document: {},
+            navigator: {},
+            location: {},
+            localStorage: { getItem: () => null, setItem: () => undefined },
+        };
+
+        const code = `var window = { asos: {} };
+            ${script}
+            globalThis.result = window.asos;`;
+
+        try {
+            vm.runInNewContext(code, context, { timeout: 500 });
+            if (context.result && Object.keys(context.result).length) return context.result;
+        } catch (error) {
+            log.debug(`window.asos eval failed: ${error.message}`);
+        }
+    }
+    return null;
 }
 
-await crawler.run(urls);
+function extractNextData(html) {
+    const match = html.match(/id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+    if (!match) return null;
+    try {
+        return JSON.parse(match[1]);
+    } catch (error) {
+        log.debug(`__NEXT_DATA__ parse failed: ${error.message}`);
+        return null;
+    }
+}
 
-await Actor.exit();
+function getProductsFromWindow(data) {
+    if (!data) return [];
+    return (
+        data.plp?.products ||
+        data.plp?.results ||
+        data.search?.products ||
+        data.props?.pageProps?.searchResults?.products ||
+        data.products ||
+        []
+    );
+}
+
+function extractPagination(obj) {
+    const p = obj?.plp?.pagination || obj?.pagination;
+    if (!p) return null;
+    return {
+        page: Number(p.pageNumber ?? p.page ?? p.currentPage ?? 1),
+        pageSize: Number(p.pageSize ?? p.itemsPerPage ?? p.perPage ?? p.limit ?? 72),
+        totalPages: Number(p.totalPages ?? p.numberOfPages ?? p.pages ?? 0) || null,
+        totalResults: Number(p.totalResults ?? p.resultCount ?? p.total ?? 0) || null,
+    };
+}
+
+function extractPaginationFromUrl(url) {
+    const u = new URL(url);
+    const page = Number(u.searchParams.get('page') || 1);
+    return { page, pageSize: null, totalPages: null, totalResults: null };
+}
+
+function nextPageUrl(currentUrl, pageInfo, productsOnPage) {
+    if (!productsOnPage) return null;
+    const urlObj = new URL(currentUrl);
+    const currentPage = pageInfo?.page || Number(urlObj.searchParams.get('page') || 1);
+    const totalPages = pageInfo?.totalPages;
+    if (totalPages && currentPage >= totalPages) return null;
+
+    urlObj.searchParams.set('page', String(currentPage + 1));
+    return urlObj.toString();
+}
+
+function pricePasses(priceObj, min, max) {
+    const value = extractPriceValue(priceObj);
+    if (min != null && value != null && value < min) return false;
+    if (max != null && value != null && value > max) return false;
+    return true;
+}
+
+function extractPriceValue(price) {
+    if (!price) return null;
+    const direct = price.current?.value ?? price.current?.price ?? price.value;
+    if (Number.isFinite(direct)) return direct;
+    return parsePriceText(price.current?.text || price.text);
+}
+
+function parsePriceText(text) {
+    if (!text) return null;
+    const match = text.replace(/,/g, '').match(/([0-9]+(?:\.[0-9]+)?)/);
+    return match ? Number(match[1]) : null;
+}
+
+function normalizeImageUrl(url) {
+    if (!url) return null;
+    let clean = url.trim();
+    if (clean.startsWith('//')) clean = `https:${clean}`;
+    if (!clean.startsWith('http')) clean = `https://images.asos-media.com/products/${clean}`;
+    return clean.split('?')[0];
+}
+
+function normalizeProduct(p) {
+    const id = String(p.id ?? p.productId ?? p.productid ?? p.product?.id ?? '');
+    const urlPath = p.url || p.productUrl || p.webUrl || null;
+    const productUrl = urlPath?.startsWith('http') ? urlPath : urlPath ? `https://www.asos.com${urlPath}` : null;
+    const currentPrice = extractPriceValue(p.price) ?? null;
+    const originalPrice = p.price?.previous?.value ?? p.price?.was?.value ?? p.price?.rrp?.value ?? null;
+
+    return {
+        id,
+        title: p.name || p.title || p.productTitle || null,
+        brand: p.brandName || p.brand?.name || null,
+        currency: p.price?.currency || p.price?.current?.symbol || null,
+        price_value: currentPrice,
+        price_text: p.price?.current?.text || (currentPrice != null ? String(currentPrice) : null),
+        original_price_value: originalPrice,
+        is_marked_down: Boolean(p.price?.isMarkedDown || (originalPrice && currentPrice && originalPrice > currentPrice)),
+        is_in_stock: p.isNoSize ? false : p.isInStock ?? true,
+        url: productUrl,
+        image_url: normalizeImageUrl(p.imageUrl || p.images?.[0]?.url || p.media?.images?.[0]?.url || null),
+        color: p.colour || p.colourWayLabel || null,
+        badge: p.badges?.[0]?.text || p.productType || null,
+    };
+}
