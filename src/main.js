@@ -3,6 +3,7 @@ import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 import { HeaderGenerator } from 'header-generator';
 import vm from 'node:vm';
+import { fetchSearchAPI, fetchStockPriceAPI, normalizeApiProduct } from './api-client.js';
 
 await Actor.init();
 
@@ -43,6 +44,14 @@ const buildSearchUrl = (page = 1) => {
 const seenIds = new Set();
 let saved = 0;
 let shouldStop = false; // Global flag to stop crawling
+
+// Track extraction methods for monitoring
+const extractionStats = {
+    windowAsos: 0,
+    restApi: 0,
+    nextData: 0,
+    domParsing: 0,
+};
 
 const productBuffer = [];
 const BATCH_SIZE = 10;
@@ -86,34 +95,77 @@ const crawler = new CheerioCrawler({
         const html = body?.toString?.() || '';
         log.info(`Processing listing: ${request.url}`);
 
-        // Prefer server-rendered data: window.asos -> __NEXT_DATA__ fallback
         const title = html.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1] || '';
         log.info(`Page title: ${title}`);
 
-        const windowAsos = extractWindowAsos(html);
-        let products = getProductsFromWindow(windowAsos);
+        let products = [];
+        let extractionMethod = null;
+        let pagination = null;
 
+        // WATERFALL EXTRACTION: window.asos -> REST API -> __NEXT_DATA__ -> DOM
+
+        // 1. Try window.asos (most reliable for SSR pages)
+        const windowAsos = extractWindowAsos(html);
+        products = getProductsFromWindow(windowAsos);
+        if (products.length) {
+            extractionMethod = 'window.asos';
+            extractionStats.windowAsos++;
+            pagination = extractPagination(windowAsos);
+            log.info(`✓ Extracted ${products.length} products via window.asos`);
+        }
+
+        // 2. Try REST API (more stable than DOM, faster than full page render)
+        if (!products.length) {
+            try {
+                const urlObj = new URL(request.url);
+                const apiKeyword = urlObj.searchParams.get('q') || keyword;
+                const apiPage = Number(urlObj.searchParams.get('page') || 1) - 1; // API is 0-indexed
+
+                const apiResponse = await fetchSearchAPI(apiKeyword, apiPage, { sortBy });
+                if (apiResponse.products?.length) {
+                    products = apiResponse.products.map(normalizeApiProduct).filter(Boolean);
+                    pagination = apiResponse.pagination;
+                    extractionMethod = 'REST API';
+                    extractionStats.restApi++;
+                    log.info(`✓ Extracted ${products.length} products via REST API`);
+                }
+            } catch (apiError) {
+                log.debug(`REST API extraction failed: ${apiError.message}`);
+            }
+        }
+
+        // 3. Try __NEXT_DATA__ (Next.js fallback)
         if (!products.length) {
             const nextData = extractNextData(html);
             products = getProductsFromWindow(nextData);
+            if (products.length) {
+                extractionMethod = '__NEXT_DATA__';
+                extractionStats.nextData++;
+                pagination = extractPagination(nextData);
+                log.info(`✓ Extracted ${products.length} products via __NEXT_DATA__`);
+            }
         }
 
-        // Fallback: DOM Parsing
+        // 4. Fallback: DOM Parsing (last resort)
         if (!products.length) {
             products = parseDomProducts(html, $);
-            if (products.length) log.info(`Recovered ${products.length} products via DOM parsing`);
+            if (products.length) {
+                extractionMethod = 'DOM parsing';
+                extractionStats.domParsing++;
+                pagination = extractPaginationFromUrl(request.url);
+                log.info(`✓ Recovered ${products.length} products via DOM parsing`);
+            }
         }
 
         if (!products.length) {
-            log.warning(`No products found on ${request.url}`);
-            // Save to Apify Key-Value Store (visible in platform)
+            log.warning(`✗ No products found on ${request.url} after all extraction methods`);
             await Actor.setValue('DEBUG_HTML_LISTING', html, { contentType: 'text/html' });
             return;
         }
 
         // Filter and Enqueue Detail Pages
         const filtered = products.filter((p) => pricePasses(p.price, minPrice, maxPrice));
-        
+
         // Only enqueue what we still need
         const needed = resultsWanted - saved;
         const toEnqueue = filtered.slice(0, needed);
@@ -433,7 +485,7 @@ function parseDomProducts(html, $) {
 
 async function handleDetail($, request, body) {
     const html = body?.toString?.() || '';
-    
+
     // Check if we've reached the limit
     if (shouldStop || saved >= resultsWanted) {
         log.info(`Already have ${saved} products, skipping ${request.url}`);
@@ -547,7 +599,7 @@ async function handleDetail($, request, body) {
         const priceVal = extractPriceValue(listingProduct.price);
         const originalPriceVal = listingProduct.price?.previous?.value;
         const curr = listingProduct.currency || '£';
-        
+
         let discount = null;
         if (originalPriceVal && priceVal && originalPriceVal > priceVal) {
             discount = `${Math.round(((originalPriceVal - priceVal) / originalPriceVal) * 100)}%`;
@@ -587,13 +639,13 @@ async function handleDetail($, request, body) {
 
         productBuffer.push(item);
         saved++;
-        
+
         // Check if we've reached the limit
         if (saved >= resultsWanted) {
             shouldStop = true;
             log.info(`Reached target of ${resultsWanted} products!`);
         }
-        
+
         // Less verbose log
         if (saved % 10 === 0) log.info(`Saved ${saved} products`);
         await pushBufferedData();
