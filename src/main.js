@@ -43,6 +43,17 @@ const buildSearchUrl = (page = 1) => {
 const seenIds = new Set();
 let saved = 0;
 
+const productBuffer = [];
+const BATCH_SIZE = 10;
+
+async function pushBufferedData(force = false) {
+    if (productBuffer.length >= BATCH_SIZE || (force && productBuffer.length > 0)) {
+        await Dataset.pushData(productBuffer);
+        log.info(`Flushed ${productBuffer.length} products to dataset.`);
+        productBuffer.length = 0;
+    }
+}
+
 const crawler = new CheerioCrawler({
     proxyConfiguration,
     maxRequestRetries: 2,
@@ -401,16 +412,7 @@ function parseDomProducts(html, $) {
     return products;
 }
 
-const productBuffer = [];
-const BATCH_SIZE = 10;
 
-async function pushBufferedData(force = false) {
-    if (productBuffer.length >= BATCH_SIZE || (force && productBuffer.length > 0)) {
-        await Dataset.pushData(productBuffer);
-        log.info(`Flushed ${productBuffer.length} products to dataset.`);
-        productBuffer.length = 0;
-    }
-}
 
 async function handleDetail($, request, body) {
     const html = body?.toString?.() || '';
