@@ -22,14 +22,12 @@
             "title": "Minimum Price",
             "type": "number",
             "description": "Filter products with price greater than or equal to this value.",
-            "editor": "number",
             "minimum": 0
         },
         "maxPrice": {
             "title": "Maximum Price",
             "type": "number",
             "description": "Filter products with price less than or equal to this value.",
-            "editor": "number",
             "minimum": 0
         },
         "sortBy": {
@@ -55,8 +53,7 @@
             "description": "Maximum number of products to collect.",
             "minimum": 1,
             "default": 20,
-            "prefill": 20,
-            "editor": "number"
+            "prefill": 20
         },
         "proxyConfiguration": {
             "title": "Proxy Configuration",

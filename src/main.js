@@ -1,11 +1,151 @@
-// ASOS Product Scraper - robust SSR window.asos extractor (Cheerio + sandboxed JS eval)
+// ASOS Product Scraper - Production-Ready Listing-Only Extractor
+// Optimized for speed and stealth - extracts complete data from listing pages only
 import { Actor, log } from 'apify';
 import { CheerioCrawler, Dataset } from 'crawlee';
 import { HeaderGenerator } from 'header-generator';
+import { gotScraping } from 'got-scraping';
 import vm from 'node:vm';
-import { fetchSearchAPI, fetchStockPriceAPI, normalizeApiProduct } from './api-client.js';
 
 await Actor.init();
+
+// ========================================
+// API CLIENT FUNCTIONS (Merged from api-client.js)
+// ========================================
+
+/**
+ * Fetch products from ASOS Search API
+ * @param {string} keyword - Search keyword
+ * @param {number} page - Page number (0-indexed for API)
+ * @param {object} options - Additional options (store, currency, sort, etc.)
+ * @returns {Promise<object>} - API response with products array
+ */
+async function fetchSearchAPI(keyword, page = 0, options = {}) {
+    const {
+        store = 'US',
+        currency = 'USD',
+        lang = 'en-US',
+        limit = 72,
+        sortBy = 'pricedesc',
+    } = options;
+
+    const offset = page * limit;
+    const url = new URL('https://www.asos.com/api/product/search/v2/categories');
+
+    url.searchParams.set('q', keyword);
+    url.searchParams.set('store', store);
+    url.searchParams.set('lang', lang);
+    url.searchParams.set('currency', currency);
+    url.searchParams.set('offset', String(offset));
+    url.searchParams.set('limit', String(limit));
+    url.searchParams.set('country', store);
+    url.searchParams.set('keyStoreDataversion', 'ornjx7v-35');
+
+    if (sortBy) {
+        url.searchParams.set('sort', sortBy);
+    }
+
+    try {
+        log.info(`Fetching ASOS Search API: ${keyword} (page ${page})`);
+
+        const response = await gotScraping({
+            url: url.toString(),
+            method: 'GET',
+            headers: buildApiHeaders(),
+            responseType: 'json',
+            timeout: { request: 30000 },
+            retry: { limit: 2 },
+        });
+
+        const data = response.body;
+
+        if (!data || !data.products) {
+            log.warning('API response missing products array');
+            return { products: [], itemCount: 0 };
+        }
+
+        log.info(`✓ API returned ${data.products?.length || 0} products`);
+        return {
+            products: data.products || [],
+            itemCount: data.itemCount || 0,
+            facets: data.facets || [],
+            pagination: {
+                page: Math.floor(offset / limit),
+                pageSize: limit,
+                totalResults: data.itemCount || 0,
+                totalPages: Math.ceil((data.itemCount || 0) / limit),
+            },
+        };
+    } catch (error) {
+        log.debug(`ASOS Search API failed: ${error.message}`);
+        return { products: [], itemCount: 0, error: error.message };
+    }
+}
+
+/**
+ * Build realistic headers for API requests
+ * @returns {object} - Headers object
+ */
+function buildApiHeaders() {
+    return {
+        'accept': 'application/json, text/plain, */*',
+        'accept-language': 'en-US,en;q=0.9',
+        'asos-c-name': 'asos-web-product-listing-page',
+        'asos-cid': 'web-product-listing-page',
+        'cache-control': 'no-cache',
+        'pragma': 'no-cache',
+        'referer': 'https://www.asos.com/search/',
+        'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-origin',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    };
+}
+
+/**
+ * Normalize API product data to consistent format
+ * @param {object} product - Raw API product object
+ * @returns {object} - Normalized product
+ */
+function normalizeApiProduct(product) {
+    if (!product) return null;
+
+    const id = String(product.id || product.productId || '');
+    const price = product.price || {};
+    const currentPrice = price.current?.value ?? price.value ?? null;
+    const previousPrice = price.previous?.value ?? price.rrp?.value ?? price.was?.value ?? null;
+
+    return {
+        id,
+        name: product.name || product.title || null,
+        brandName: product.brandName || product.brand?.name || null,
+        price: {
+            current: {
+                value: currentPrice,
+                text: price.current?.text || (currentPrice ? `${price.currency || ''}${currentPrice}` : null),
+            },
+            previous: {
+                value: previousPrice,
+                text: previousPrice ? `${price.currency || ''}${previousPrice}` : null,
+            },
+            currency: price.currency || 'USD',
+            isMarkedDown: price.isMarkedDown || (previousPrice && currentPrice && previousPrice > currentPrice) || false,
+        },
+        url: product.url?.startsWith('http') ? product.url : `https://www.asos.com${product.url || ''}`,
+        imageUrl: product.imageUrl || product.images?.[0]?.url || null,
+        colour: product.colour || product.colourWayId || product.color || null,
+        isInStock: product.isInStock ?? !product.isNoSize ?? true,
+        productCode: product.productCode || product.sku || null,
+        badges: product.badges || [],
+        productType: product.productType || null,
+    };
+}
+
+// ========================================
+// MAIN SCRAPER LOGIC
+// ========================================
 
 const input = (await Actor.getInput()) || {};
 const {
@@ -67,28 +207,24 @@ async function pushBufferedData(force = false) {
 const crawler = new CheerioCrawler({
     proxyConfiguration,
     maxRequestRetries: 2,
-    maxConcurrency: 3,
-    requestHandlerTimeoutSecs: 80,
+    maxConcurrency: 5, // Increased from 3 for better speed
+    requestHandlerTimeoutSecs: 60,
     useSessionPool: true,
-    sessionPoolOptions: { maxPoolSize: 10, sessionOptions: { maxUsageCount: 10 } },
+    sessionPoolOptions: { maxPoolSize: 20, sessionOptions: { maxUsageCount: 15 } },
     additionalMimeTypes: ['text/html'],
     preNavigationHooks: [
         async ({ request }) => {
             const headers = headerGenerator.getHeaders();
             request.headers = { ...headers, ...request.headers };
+            
+            // Add random delay for stealth (200-800ms)
+            await new Promise(resolve => setTimeout(resolve, 200 + Math.random() * 600));
         },
     ],
     async requestHandler({ $, request, body, crawler: crawlerInstance }) {
         // Check if we should stop processing
         if (shouldStop || saved >= resultsWanted) {
             log.info(`Already reached target of ${resultsWanted} products. Skipping request.`);
-            return;
-        }
-
-        const { label } = request.userData;
-
-        if (label === 'DETAIL') {
-            await handleDetail($, request, body);
             return;
         }
 
@@ -163,48 +299,60 @@ const crawler = new CheerioCrawler({
             return;
         }
 
-        // Filter and Enqueue Detail Pages
+        // ==================================================
+        // SAVE PRODUCTS DIRECTLY FROM LISTING (No detail page visits!)
+        // ==================================================
+        
         const filtered = products.filter((p) => pricePasses(p.price, minPrice, maxPrice));
-
-        // Only enqueue what we still need
         const needed = resultsWanted - saved;
-        const toEnqueue = filtered.slice(0, needed);
+        const toSave = filtered.slice(0, needed);
 
-        log.info(`Found ${filtered.length} products, enqueueing ${toEnqueue.length} (already have ${saved}/${resultsWanted})`);
+        log.info(`Found ${filtered.length} products, saving ${toSave.length} directly (already have ${saved}/${resultsWanted})`);
 
-        for (const p of toEnqueue) {
+        for (const p of toSave) {
             if (saved >= resultsWanted) {
                 shouldStop = true;
                 break;
             }
 
-            // We need a unique ID to dedup. 
-            // If we have a robust ID from listing, use it. Otherwise url is key.
             const id = String(p.id || p.productId || '');
-            if (id && seenIds.has(id)) continue;
+            if (id && seenIds.has(id)) {
+                log.debug(`Skipping duplicate product ID: ${id}`);
+                continue;
+            }
             if (id) seenIds.add(id);
 
-            let productUrl = p.url || p.productUrl;
-            if (productUrl && !productUrl.startsWith('http')) {
-                productUrl = `https://www.asos.com${productUrl}`;
+            // Transform to final output format
+            const finalProduct = transformToFinalFormat(p);
+            
+            // Validate critical fields before saving
+            if (!finalProduct.product_id || !finalProduct.title || !finalProduct.product_url) {
+                log.warning(`Skipping product with missing critical data: ${finalProduct.product_id || 'unknown'}`);
+                continue;
             }
 
-            if (productUrl) {
-                log.debug(`Enqueueing detail: ${productUrl}`);
-                await crawlerInstance.addRequests([{
-                    url: productUrl,
-                    userData: { label: 'DETAIL', listingProduct: p } // Pass listing data as backup
-                }]);
+            productBuffer.push(finalProduct);
+            saved++;
+
+            if (saved % 10 === 0) log.info(`Saved ${saved} products`);
+            await pushBufferedData();
+            
+            if (saved >= resultsWanted) {
+                shouldStop = true;
+                log.info(`✓ Reached target of ${resultsWanted} products!`);
+                break;
             }
         }
 
         // Listing Pagination - only if we still need more products
-        if (saved < resultsWanted && toEnqueue.length === filtered.length) {
+        if (saved < resultsWanted && toSave.length === filtered.length) {
             const pagination = extractPagination(windowAsos) || extractPaginationFromUrl(request.url);
             const nextUrl = nextPageUrl(request.url, pagination, products.length);
             if (nextUrl) {
                 log.info(`Enqueueing next page: ${nextUrl}`);
                 await crawlerInstance.addRequests([{ url: nextUrl }]);
+            } else {
+                log.info(`No more pages available`);
             }
         } else {
             log.info(`Not enqueueing next page - have enough products or reached limit`);
@@ -212,11 +360,74 @@ const crawler = new CheerioCrawler({
     },
 });
 
+// ========================================
+// EXECUTION
+// ========================================
+
 await crawler.run([startUrl || buildSearchUrl(1)]);
 
 log.info('Crawl finished.');
+
+// Log extraction method statistics for monitoring
+log.info('Extraction method usage:', extractionStats);
+
 await pushBufferedData(true);
 await Actor.exit();
+
+// ========================================
+// PRODUCT TRANSFORMATION & FORMATTING
+// ========================================
+
+/**
+ * Transform listing product to final output format
+ * @param {object} p - Product from listing extraction
+ * @returns {object} - Final formatted product
+ */
+function transformToFinalFormat(p) {
+    const id = String(p.id || p.productId || '');
+    const currentPrice = extractPriceValue(p.price);
+    const originalPrice = p.price?.previous?.value ?? null;
+    const currency = p.price?.currency || p.currency || '£';
+    
+    // Calculate discount
+    let discount = null;
+    if (originalPrice && currentPrice && originalPrice > currentPrice) {
+        discount = `${Math.round(((originalPrice - currentPrice) / originalPrice) * 100)}%`;
+    }
+    
+    // Format prices
+    const formattedPrice = currentPrice ? `${currency}${currentPrice.toFixed(2)}` : null;
+    const formattedOriginalPrice = originalPrice ? `${currency}${originalPrice.toFixed(2)}` : null;
+    
+    // Determine URL
+    let productUrl = p.url || p.productUrl;
+    if (productUrl && !productUrl.startsWith('http')) {
+        productUrl = `https://www.asos.com${productUrl}`;
+    }
+    
+    // Get brand - try multiple properties
+    const brand = p.brandName || p.brand?.name || p.brand || null;
+    
+    return {
+        product_id: id,
+        title: p.name || p.title || null,
+        brand: brand,
+        price: formattedPrice,
+        original_price: formattedOriginalPrice,
+        discount: discount,
+        currency: currency,
+        color: p.colour || p.color || null,
+        size_available: 'Available online', // Listing pages don't have size details
+        is_sale: p.isMarkedDown || (originalPrice && currentPrice && originalPrice > currentPrice) ? 'Yes' : 'No',
+        product_url: productUrl,
+        image_url: normalizeImageUrl(p.imageUrl || p.images?.[0]?.url),
+        description: null, // Not available from listing pages - would require detail page visit
+    };
+}
+
+// ========================================
+// EXTRACTION UTILITY FUNCTIONS
+// ========================================
 
 function extractWindowAsos(html) {
     // 1) Structured JSON payloads: <script data-id="window.asos..." type="application/json">{...}</script>
@@ -481,176 +692,3 @@ function parseDomProducts(html, $) {
     return products;
 }
 
-
-
-async function handleDetail($, request, body) {
-    const html = body?.toString?.() || '';
-
-    // Check if we've reached the limit
-    if (shouldStop || saved >= resultsWanted) {
-        log.info(`Already have ${saved} products, skipping ${request.url}`);
-        return;
-    }
-
-    // 1. Try window.asos
-    let windowAsos = extractWindowAsos(html);
-    let pdp = windowAsos?.pdp;
-
-    // 2. Try __NEXT_DATA__ if window.asos is missing (Layout difference)
-    if (!pdp) {
-        const nextData = extractNextData(html);
-        if (nextData?.props?.pageProps?.initialStoreConfig) {
-            // Sometimes data is here, but often specific product data is deep
-            // In Next.js ASOS, often verify: nextData.props.pageProps.product
-            pdp = { product: nextData.props.pageProps.product, config: nextData.props.pageProps };
-        }
-    }
-
-    // Backup: Listing data passed via userData
-    const listingProduct = request.userData.listingProduct || {};
-
-    // Fallback variables
-    let item = null;
-
-    if (pdp && (pdp.product || pdp.config?.product)) {
-        try {
-            const p = pdp.config?.product || pdp.product || {};
-            const config = pdp.config || {};
-
-            // Resolving Price
-            let priceData = null;
-            if (config.stockPriceResponse) {
-                try {
-                    const stockPrice = JSON.parse(config.stockPriceResponse);
-                    if (Array.isArray(stockPrice)) priceData = stockPrice[0]?.productPrice;
-                } catch (e) { }
-            }
-            if (!priceData) priceData = p.price;
-
-            const variants = p.variants || [];
-            const firstVariant = variants[0] || {};
-
-            const id = String(p.id || p.productCode || listingProduct.id || '');
-            const title = p.name || listingProduct.title;
-            const brand = p.brandName || listingProduct.brand;
-            const images = p.images || [];
-            const imageUrl = images[0]?.url ? normalizeImageUrl(images[0].url) : normalizeImageUrl(listingProduct.imageUrl);
-
-            const sizes = variants.map(v => ({
-                id: v.variantId,
-                name: v.size,
-                is_in_stock: v.isInStock,
-                sku: v.sku
-            }));
-
-            const currency = priceData?.currency || config.currency || 'GBP';
-            const currentPriceVal = priceData?.current?.value ?? listingProduct.price_value;
-            const previousPriceVal = priceData?.previous?.value || priceData?.rrp?.value || listingProduct.original_price_value;
-
-            const color = firstVariant.colour || p.colour || listingProduct.color;
-
-            let badge = null;
-            if (p.badges && p.badges.length > 0) {
-                badge = p.badges.map(b => b.label || b.text).join(', ');
-            } else {
-                badge = listingProduct.badge;
-            }
-
-            const isMarkedDown = p.isMarkedDown || (previousPriceVal && currentPriceVal && previousPriceVal > currentPriceVal) || listingProduct.is_marked_down;
-
-            // Calculate discount percentage
-            let discount = null;
-            if (previousPriceVal && currentPriceVal && previousPriceVal > currentPriceVal) {
-                discount = `${Math.round(((previousPriceVal - currentPriceVal) / previousPriceVal) * 100)}%`;
-            }
-
-            // Format price with currency
-            const formattedPrice = currentPriceVal ? `${currency}${currentPriceVal.toFixed(2)}` : null;
-            const formattedOriginalPrice = previousPriceVal ? `${currency}${previousPriceVal.toFixed(2)}` : null;
-
-            // Format sizes - get available sizes only
-            const availableSizes = sizes.filter(s => s.is_in_stock).map(s => s.name).join(', ') || 'N/A';
-
-            item = {
-                product_id: id,
-                title,
-                brand,
-                price: formattedPrice,
-                original_price: formattedOriginalPrice,
-                discount,
-                color,
-                size_available: availableSizes,
-                is_sale: isMarkedDown ? 'Yes' : 'No',
-                product_url: request.url,
-                // Additional fields for reference
-                image_url: imageUrl,
-                currency,
-                description: null, // Will fetch below
-            };
-        } catch (e) {
-            log.debug(`JSON extraction error on ${request.url}: ${e.message}`);
-        }
-    }
-
-    // fallback to DOM if we have partial or no item
-    // Or if we want to enrich specific fields like description which are often DOM-only
-    if (!item) {
-        // Construct from Listing Product + DOM Fallback
-        const priceVal = extractPriceValue(listingProduct.price);
-        const originalPriceVal = listingProduct.price?.previous?.value;
-        const curr = listingProduct.currency || '£';
-
-        let discount = null;
-        if (originalPriceVal && priceVal && originalPriceVal > priceVal) {
-            discount = `${Math.round(((originalPriceVal - priceVal) / originalPriceVal) * 100)}%`;
-        }
-
-        item = {
-            product_id: String(listingProduct.id || ''),
-            title: listingProduct.name || listingProduct.title,
-            brand: listingProduct.brandName || listingProduct.brand,
-            price: priceVal ? `${curr}${priceVal.toFixed(2)}` : null,
-            original_price: originalPriceVal ? `${curr}${originalPriceVal.toFixed(2)}` : null,
-            discount,
-            color: listingProduct.colour || listingProduct.color,
-            size_available: 'Check website',
-            is_sale: listingProduct.isMarkedDown ? 'Yes' : 'No',
-            product_url: request.url,
-            image_url: normalizeImageUrl(listingProduct.imageUrl),
-            currency: curr,
-            description: null,
-        };
-    }
-
-    // Always try to enrich with DOM for Description if missing
-    if (!item.description) {
-        let productDetails = $('#productDescription').text().trim();
-        if (productDetails) {
-            item.description = productDetails.replace(/\s+/g, ' ').substring(0, 500); // Limit length
-        }
-    }
-
-    if (item && item.product_id) {
-        // Final validation - ensure no undefined/null critical fields
-        if (!item.title || !item.product_url) {
-            log.warning(`Skipping product with missing critical data: ${request.url}`);
-            return;
-        }
-
-        productBuffer.push(item);
-        saved++;
-
-        // Check if we've reached the limit
-        if (saved >= resultsWanted) {
-            shouldStop = true;
-            log.info(`Reached target of ${resultsWanted} products!`);
-        }
-
-        // Less verbose log
-        if (saved % 10 === 0) log.info(`Saved ${saved} products`);
-        await pushBufferedData();
-    } else {
-        log.debug(`Could not extract valid product from ${request.url}`);
-        await Actor.setValue(`DEBUG_FAIL_${Math.random()}`, html, { contentType: 'text/html' });
-    }
-}
