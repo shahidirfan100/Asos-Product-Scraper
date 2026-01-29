@@ -73,6 +73,12 @@ const crawler = new CheerioCrawler({
             products = getProductsFromWindow(nextData);
         }
 
+        // Fallback: DOM Parsing
+        if (!products.length) {
+            products = parseDomProducts(html, $);
+            if (products.length) log.info(`Recovered ${products.length} products via DOM parsing`);
+        }
+
         if (!products.length) {
             log.warning(`No products found on ${request.url}`);
 
@@ -282,4 +288,71 @@ function parseJsonSafe(str) {
             return null;
         }
     }
+}
+
+function parseDomProducts(html, $) {
+    const products = [];
+    // Selectors based on browser investigation
+    const tiles = $('article, [data-testid="productTile"], li[class*="productTile"]');
+
+    tiles.each((i, el) => {
+        try {
+            const tile = $(el);
+            const link = tile.find('a[class*="productLink"]').first();
+            const href = link.attr('href');
+            if (!href) return;
+
+            const idMatch = href.match(/\/prd\/(\d+)/i) || href.match(/\/grp\/(\d+)/i);
+            const id = idMatch ? idMatch[1] : `dom-${i}`;
+
+            // Image
+            const img = tile.find('img').first();
+            const imageUrl = img.attr('src');
+
+            // Metadata from aria-label on info div is very rich
+            const infoDiv = tile.find('[class*="productInfo"]');
+            const ariaLabel = infoDiv.attr('aria-label') || link.attr('title') || '';
+
+            // Extract prices
+            let priceVal = null;
+            let origPriceVal = null;
+            const priceText = tile.find('[data-testid="current-price"]').text() || tile.text();
+
+            if (ariaLabel) {
+                // "Original price $124.75 current price $106.65"
+                const currentMatch = ariaLabel.match(/current price\s*([$£€]?\d+(?:\.\d+)?)/i);
+                const originalMatch = ariaLabel.match(/Original price\s*([$£€]?\d+(?:\.\d+)?)/i);
+                if (currentMatch) priceVal = parsePriceText(currentMatch[1]);
+                if (originalMatch) origPriceVal = parsePriceText(originalMatch[1]);
+            }
+
+            if (!priceVal) {
+                // Fallback to text parsing
+                priceVal = parsePriceText(priceText);
+            }
+
+            // Title
+            const title = tile.find('p[class*="productDescription"]').text() ||
+                img.attr('alt') ||
+                ariaLabel.split(',')[0] ||
+                'Unknown Product';
+
+            products.push({
+                id,
+                name: title,
+                url: href,
+                imageUrl,
+                price: {
+                    current: { value: priceVal, text: priceText },
+                    previous: { value: origPriceVal }
+                },
+                brandName: null, // Hard to get from DOM reliably without classes
+                isMarkedDown: !!origPriceVal
+            });
+        } catch (e) {
+            // Ignore single failures
+        }
+    });
+
+    return products;
 }
