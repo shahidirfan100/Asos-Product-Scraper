@@ -120,7 +120,7 @@ function normalizeApiProduct(product) {
     return {
         id,
         name: product.name || product.title || null,
-        brandName: product.brandName || product.brand?.name || null,
+        brandName: product.brandName || product.brand?.name || product.brand || null,
         price: {
             current: {
                 value: currentPrice,
@@ -130,13 +130,21 @@ function normalizeApiProduct(product) {
                 value: previousPrice,
                 text: previousPrice ? `${price.currency || ''}${previousPrice}` : null,
             },
+            was: {
+                value: price.was?.value ?? null,
+            },
+            rrp: {
+                value: price.rrp?.value ?? null,
+            },
             currency: price.currency || 'USD',
             isMarkedDown: price.isMarkedDown || (previousPrice && currentPrice && previousPrice > currentPrice) || false,
         },
         url: product.url?.startsWith('http') ? product.url : `https://www.asos.com${product.url || ''}`,
-        imageUrl: product.imageUrl || product.images?.[0]?.url || null,
-        colour: product.colour || product.colourWayId || product.color || null,
+        imageUrl: product.imageUrl || product.images?.[0]?.url || product.media?.images?.[0]?.url || null,
+        images: product.images || [],
+        colour: product.colour || product.colourWayId || product.color || product.colourWayLabel || null,
         isInStock: product.isInStock ?? !product.isNoSize ?? true,
+        isMarkedDown: price.isMarkedDown || (previousPrice && currentPrice && previousPrice > currentPrice) || false,
         productCode: product.productCode || product.sku || null,
         badges: product.badges || [],
         productType: product.productType || null,
@@ -386,7 +394,7 @@ await Actor.exit();
 function transformToFinalFormat(p) {
     const id = String(p.id || p.productId || '');
     const currentPrice = extractPriceValue(p.price);
-    const originalPrice = p.price?.previous?.value ?? null;
+    const originalPrice = p.price?.previous?.value ?? p.price?.was?.value ?? p.price?.rrp?.value ?? null;
     const currency = p.price?.currency || p.currency || '£';
     
     // Calculate discount
@@ -405,8 +413,26 @@ function transformToFinalFormat(p) {
         productUrl = `https://www.asos.com${productUrl}`;
     }
     
-    // Get brand - try multiple properties
+    // Get brand - try all possible properties
     const brand = p.brandName || p.brand?.name || p.brand || null;
+    
+    // Get color - try all variants
+    const color = p.colour || p.color || p.colourWayLabel || p.colourWayId || null;
+    
+    // Get description from available sources
+    // Some products have description in productType, badges, or additionalImageUrls text
+    let description = null;
+    if (p.productType && p.productType !== 'Product') {
+        description = p.productType;
+    } else if (p.badges && p.badges.length > 0) {
+        const badgeTexts = p.badges.map(b => b.text || b.label).filter(Boolean);
+        if (badgeTexts.length > 0) {
+            description = badgeTexts.join(', ');
+        }
+    }
+    
+    // Get best available image
+    const imageUrl = p.imageUrl || p.images?.[0]?.url || p.media?.images?.[0]?.url || null;
     
     return {
         product_id: id,
@@ -416,12 +442,12 @@ function transformToFinalFormat(p) {
         original_price: formattedOriginalPrice,
         discount: discount,
         currency: currency,
-        color: p.colour || p.color || null,
-        size_available: 'Available online', // Listing pages don't have size details
-        is_sale: p.isMarkedDown || (originalPrice && currentPrice && originalPrice > currentPrice) ? 'Yes' : 'No',
+        color: color,
+        size_available: 'Available online', // Listing pages don't have detailed size info
+        is_sale: p.isMarkedDown || p.price?.isMarkedDown || (originalPrice && currentPrice && originalPrice > currentPrice) ? 'Yes' : 'No',
         product_url: productUrl,
-        image_url: normalizeImageUrl(p.imageUrl || p.images?.[0]?.url),
-        description: null, // Not available from listing pages - would require detail page visit
+        image_url: normalizeImageUrl(imageUrl),
+        description: description,
     };
 }
 
@@ -551,9 +577,37 @@ function parsePriceText(text) {
 function normalizeImageUrl(url) {
     if (!url) return null;
     let clean = url.trim();
+    
+    // Handle protocol-relative URLs
     if (clean.startsWith('//')) clean = `https:${clean}`;
-    if (!clean.startsWith('http')) clean = `https://images.asos-media.com/products/${clean}`;
-    return clean.split('?')[0];
+    
+    // Handle relative paths
+    if (!clean.startsWith('http')) {
+        clean = `https://images.asos-media.com/products/${clean}`;
+    }
+    
+    // Remove query parameters first
+    clean = clean.split('?')[0];
+    
+    // ASOS images need proper size suffix and extension
+    // If URL doesn't have an extension or size suffix, add them
+    if (!clean.match(/\.(jpg|jpeg|png|webp)$/i)) {
+        // Check if it already has a size suffix (e.g., -1-black, -2-white)
+        if (!clean.match(/-\d+-[a-z]+$/i)) {
+            // Add default size suffix if missing
+            clean = `${clean}-1-product`;
+        }
+        // Add .jpg extension
+        clean = `${clean}.jpg`;
+    }
+    
+    // Ensure high-quality image by specifying dimensions
+    // ASOS supports ?$XXL$ format for better quality
+    if (!clean.includes('?')) {
+        clean = `${clean}?$XXL$`;
+    }
+    
+    return clean;
 }
 
 function normalizeProduct(p) {
@@ -630,33 +684,44 @@ function parseDomProducts(html, $) {
             const descriptionText = tile.find('p[class*="productDescription"]').text().trim();
             const ariaLabel = infoDivAttr(tile, link, 'aria-label');
 
-            // Extracting Brand is hard without specific classes, but often ASOS titles start with Brand
-            // For now, we leave Brand null unless we find a specific element or pattern
-            // Some ASOS tiles have a 'div[class*="brandName"]' or similar hidden? Not in recent scans.
-            // We will refine Title to remove Price if it leaked in.
+            // Try to extract brand from title
+            // ASOS titles often follow pattern: "Brand Name Product Name"
+            // Extract brand by looking for known patterns or first part before product description
+            let brandName = null;
+            if (descriptionText) {
+                // Common brand patterns - first word/phrase is often the brand
+                const brandMatch = descriptionText.match(/^([A-Z][a-z]+(?:\s+[A-Z&]+)*)/);
+                if (brandMatch) {
+                    brandName = brandMatch[1];
+                }
+            }
 
-            // Prices
-            // Robust extraction from aria-label or text
-            // Text is often "£34.00" or "£34.00\nWas £40.00"
-            const priceSection = tile.find('span[class*="price"]').first().parent(); // Often container
+            // Prices - extract both current and previous (was) prices
+            const priceSection = tile.find('span[class*="price"]').first().parent();
             const currentPriceText = tile.find('span[data-testid="current-price"]').text() ||
+                tile.find('span[class*="currentPrice"]').text() ||
                 tile.find('span[class*="saleAmount"]').text() ||
                 tile.find('span[class*="price"]').first().text();
 
-            let priceVal = parsePriceText(currentPriceText);
+            // Try to find previous/was price
+            const previousPriceText = tile.find('span[data-testid="previous-price"]').text() ||
+                tile.find('span[class*="previousPrice"]').text() ||
+                tile.find('span[class*="wasPrice"]').text() ||
+                priceSection.find('span:contains("Was")').text().replace(/Was\s*/i, '') ||
+                null;
+
+            const priceVal = parsePriceText(currentPriceText);
+            const previousPriceVal = parsePriceText(previousPriceText);
 
             // Aria-label is usually "Title, current price $XX, original price $YY"
-            // We can re-parse title from aria-label if description is empty, splitting by 'current price'
             let title = descriptionText;
             if (!title && ariaLabel) {
                 title = ariaLabel.split(/current price|Original price/i)[0].replace(/,$/, '').trim();
             }
 
-            // Clean title if it contains price (Edge case reported by user)
-            // e.g. "Hoodie... £34.00" -> remove price part if present at end
+            // Clean title if it contains price
             if (title && priceVal) {
-                // specific check if title ENDS with price-like text
-                title = title.replace(/\s*£\d+\.\d+.*$/, '').trim();
+                title = title.replace(/\s*[£$€]\d+\.\d+.*$/, '').trim();
             }
 
             // Currency
@@ -666,9 +731,16 @@ function parseDomProducts(html, $) {
                 if (currencyMatch) currency = currencyMatch[0];
             }
 
+            // Try to extract color from URL or aria-label
+            let color = null;
+            const colorMatch = href.match(/colourWayId[-=](\d+)/i) || 
+                               ariaLabel?.match(/in\s+([a-z\s]+)$/i);
+            if (colorMatch) {
+                color = colorMatch[1];
+            }
+
             // Badge / Product Type
-            // Often in a 'div[class*="sellingFast"]' or similar overlay
-            const badge = tile.find('div[class*="sellingFast"], span[class*="overlay"]').text().trim() || null;
+            const badge = tile.find('div[class*="sellingFast"], span[class*="overlay"], div[class*="badge"]').text().trim() || null;
 
             products.push({
                 id,
@@ -677,12 +749,18 @@ function parseDomProducts(html, $) {
                 imageUrl,
                 price: {
                     current: { value: priceVal, text: currentPriceText },
-                    previous: { value: null } // Hard to extract reliably from mixed DOM without clear selectors
+                    previous: { value: previousPriceVal, text: previousPriceText },
+                    was: { value: previousPriceVal },
+                    rrp: { value: previousPriceVal },
+                    isMarkedDown: previousPriceVal && priceVal && previousPriceVal > priceVal,
                 },
-                brandName: null, // Without explicit brand field, better null than wrong
-                isMarkedDown: false,
+                brandName: brandName,
+                colour: color,
+                isMarkedDown: previousPriceVal && priceVal && previousPriceVal > priceVal,
                 currency: currency,
-                badge: badge
+                badge: badge,
+                productType: badge,
+                badges: badge ? [{ text: badge }] : [],
             });
         } catch (e) {
             // Ignore (log.debug(e.message) if needed)
