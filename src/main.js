@@ -424,16 +424,44 @@ function transformToFinalFormat(p) {
 
     // Get description from available sources
     let description = null;
-    if (p.productType && p.productType !== 'Product') {
-        description = p.productType;
-    } else if (p.badges && p.badges.length > 0) {
-        const badgeTexts = p.badges.map(b => b.text || b.label).filter(Boolean);
-        if (badgeTexts.length > 0) {
-            description = badgeTexts.join(' | ')
-                .replace(/MORE\s*COLOURS/gi, 'More Colors')
-                .replace(/Selling\s*fast/gi, 'Selling Fast')
-                .replace(/\s+/g, ' ')
-                .trim();
+    
+    // First priority: Extract meaningful description from product title
+    // Remove brand name and color to get product description
+    if (p.name || p.title) {
+        let desc = (p.name || p.title).trim();
+        
+        // Remove brand name from title if present
+        if (brand) {
+            desc = desc.replace(new RegExp(`^${brand.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'i'), '');
+        }
+        
+        // Remove color phrase ("in [color]") from description
+        if (color) {
+            desc = desc.replace(new RegExp(`\\s+in\\s+${color.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*$`, 'i'), '');
+        }
+        
+        // Clean up extra spaces
+        desc = desc.replace(/\s+/g, ' ').trim();
+        
+        // Only use if we have meaningful content (more than just brand/color)
+        if (desc.length > 5) {
+            description = desc;
+        }
+    }
+    
+    // Fallback to product type or badges if title-based description is not available
+    if (!description) {
+        if (p.productType && p.productType !== 'Product') {
+            description = p.productType;
+        } else if (p.badges && p.badges.length > 0) {
+            const badgeTexts = p.badges.map(b => b.text || b.label).filter(Boolean);
+            if (badgeTexts.length > 0) {
+                description = badgeTexts.join(' | ')
+                    .replace(/MORE\s*COLOURS/gi, 'More Colors')
+                    .replace(/Selling\s*fast/gi, 'Selling Fast')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+            }
         }
     }
 
@@ -709,6 +737,16 @@ function parseDomProducts(html, $) {
                     imageUrl = srcsetImages[0] || null;
                 }
             }
+            
+            // If still no image, try to extract from href or construct from product ID
+            if (!imageUrl || imageUrl.includes('placeholder') || imageUrl.includes('data:image')) {
+                // Try to construct image URL from product ID
+                if (idMatch && idMatch[1]) {
+                    const productId = idMatch[1];
+                    // ASOS image pattern: //images.asos-media.com/products/{path}/{productId}-1-{color}
+                    imageUrl = `//images.asos-media.com/products/${href.split('/').slice(-3, -1).join('/')}/${productId}-1`;
+                }
+            }
 
             // Normalize and ensure proper format
             if (imageUrl && !imageUrl.includes('placeholder') && !imageUrl.includes('data:image')) {
@@ -727,17 +765,40 @@ function parseDomProducts(html, $) {
             // Brand is capitalized, product description starts with lowercase
             let brandName = null;
             if (descriptionText) {
-                // Match only capitalized words, stop at first lowercase word
+                // Match only capitalized words, stop at first lowercase word or common product descriptor
                 // This handles: "New Balance", "Polo Ralph Lauren", "ASOS DESIGN"
-                // But stops at: "Dune London Insight" -> "Dune London"
+                // But removes product words like: "Maxwell", "Marland", "Gorham"
                 const brandMatch = descriptionText.match(/^([A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)*?)\s+[a-z]/);
                 if (brandMatch) {
                     brandName = brandMatch[1].trim();
+                    // Remove common product line names (single capitalized word at end)
+                    // Keep multi-word brands: "Polo Ralph Lauren" but remove "Maxwell"
+                    const words = brandName.split(' ');
+                    if (words.length > 2 && words[words.length - 1].match(/^[A-Z][a-z]+$/)) {
+                        // If last word is title case and brand has 3+ words, check if it's a product line
+                        const lastWord = words[words.length - 1];
+                        if (lastWord !== 'Lauren' && lastWord !== 'London' && !lastWord.match(/^(Co|Inc|Ltd|DESIGN|Collection)$/)) {
+                            brandName = words.slice(0, -1).join(' ');
+                        }
+                    }
                 } else {
                     // Fallback: if entire title is capitalized (like "ASOS DESIGN")
                     const fallbackMatch = descriptionText.match(/^([A-Z][A-Z\s&]+)/);
                     if (fallbackMatch) {
                         brandName = fallbackMatch[1].trim().split(/\s{2,}/)[0]; // Stop at double space
+                    }
+                }
+                
+                // Additional fallback: extract first 2-4 capitalized words if still no brand
+                if (!brandName) {
+                    const capitalWords = descriptionText.match(/^([A-Z][A-Za-z]+(?:\s+[A-Z&][A-Za-z]*){0,3})/);
+                    if (capitalWords) {
+                        const extracted = capitalWords[1].trim();
+                        // Stop before size indicators or common modifiers
+                        const cleanBrand = extracted.replace(/\s+(Big|Tall|Plus|Size|Collection).*$/i, '').trim();
+                        if (cleanBrand.length > 2) {
+                            brandName = cleanBrand;
+                        }
                     }
                 }
             }
