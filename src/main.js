@@ -165,7 +165,7 @@ const {
     minPrice,
     maxPrice,
     sortBy = 'pricedesc',
-    results_wanted: resultsWantedRaw = 20,
+    resultsWanted: resultsWantedRaw = 20,
     proxyConfiguration: proxyInput,
 } = input;
 

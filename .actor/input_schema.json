@@ -9,14 +9,14 @@
             "type": "string",
             "description": "Direct ASOS search or category URL. If provided, overrides keyword search.",
             "editor": "textfield",
-            "example": "https://www.asos.com/men/ctas/curated-category-3/cat/?cid=51451"
+            "prefill": "https://www.asos.com/search/?q=men+shoes"
         },
         "keyword": {
             "title": "Search Keyword",
             "type": "string",
             "description": "Product search term (e.g., 'men shoes', 'women dresses', 'jackets').",
             "editor": "textfield",
-            "prefill": "men"
+            "prefill": "men shoes"
         },
         "minPrice": {
             "title": "Minimum Price",
@@ -47,7 +47,7 @@
             ],
             "default": "pricedesc"
         },
-        "results_wanted": {
+        "resultsWanted": {
             "title": "Results Wanted",
             "type": "integer",
             "description": "Maximum number of products to collect.",
@@ -68,6 +68,6 @@
             }
         }
     },
-    "required": [],
+    "required": ["keyword"],
     "additionalProperties": false
 }
