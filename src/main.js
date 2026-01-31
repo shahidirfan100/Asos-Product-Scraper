@@ -655,11 +655,6 @@ function normalizeImageUrl(url) {
         clean = `${clean}.jpg`;
     }
 
-    // Ensure high-quality image by specifying dimensions
-    if (!clean.includes('?')) {
-        clean = `${clean}?$XXL$`;
-    }
-
     return clean;
 }
 
@@ -765,39 +760,48 @@ function parseDomProducts(html, $) {
             // Brand is capitalized, product description starts with lowercase
             let brandName = null;
             if (descriptionText) {
-                // Match only capitalized words, stop at first lowercase word or common product descriptor
-                // This handles: "New Balance", "Polo Ralph Lauren", "ASOS DESIGN"
-                // But removes product words like: "Maxwell", "Marland", "Gorham"
-                const brandMatch = descriptionText.match(/^([A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)*?)\s+[a-z]/);
-                if (brandMatch) {
-                    brandName = brandMatch[1].trim();
-                    // Remove common product line names (single capitalized word at end)
-                    // Keep multi-word brands: "Polo Ralph Lauren" but remove "Maxwell"
-                    const words = brandName.split(' ');
-                    if (words.length > 2 && words[words.length - 1].match(/^[A-Z][a-z]+$/)) {
-                        // If last word is title case and brand has 3+ words, check if it's a product line
-                        const lastWord = words[words.length - 1];
-                        if (lastWord !== 'Lauren' && lastWord !== 'London' && !lastWord.match(/^(Co|Inc|Ltd|DESIGN|Collection)$/)) {
-                            brandName = words.slice(0, -1).join(' ');
+                // Special case for adidas brands (handles both capitalized and lowercase)
+                // Examples: "adidas performance", "adidas Running", "adidas Originals"
+                const adidasMatch = descriptionText.match(/^adidas\s+([A-Za-z]+)/i);
+                if (adidasMatch) {
+                    // Capitalize properly: "adidas Performance", "adidas Running"
+                    const subBrand = adidasMatch[1].charAt(0).toUpperCase() + adidasMatch[1].slice(1).toLowerCase();
+                    brandName = `adidas ${subBrand}`;
+                } else {
+                    // Match only capitalized words, stop at first lowercase word or common product descriptor
+                    // This handles: "New Balance", "Polo Ralph Lauren", "ASOS DESIGN"
+                    // But removes product words like: "Maxwell", "Marland", "Gorham"
+                    const brandMatch = descriptionText.match(/^([A-Z][A-Za-z]*(?:\s+[A-Z][A-Za-z]*)*?)\s+[a-z]/);
+                    if (brandMatch) {
+                        brandName = brandMatch[1].trim();
+                        // Remove common product line names (single capitalized word at end)
+                        // Keep multi-word brands: "Polo Ralph Lauren" but remove "Maxwell"
+                        const words = brandName.split(' ');
+                        if (words.length > 2 && words[words.length - 1].match(/^[A-Z][a-z]+$/)) {
+                            // If last word is title case and brand has 3+ words, check if it's a product line
+                            const lastWord = words[words.length - 1];
+                            if (lastWord !== 'Lauren' && lastWord !== 'London' && !lastWord.match(/^(Co|Inc|Ltd|DESIGN|Collection)$/)) {
+                                brandName = words.slice(0, -1).join(' ');
+                            }
+                        }
+                    } else {
+                        // Fallback: if entire title is capitalized (like "ASOS DESIGN")
+                        const fallbackMatch = descriptionText.match(/^([A-Z][A-Z\s&]+)/);
+                        if (fallbackMatch) {
+                            brandName = fallbackMatch[1].trim().split(/\s{2,}/)[0]; // Stop at double space
                         }
                     }
-                } else {
-                    // Fallback: if entire title is capitalized (like "ASOS DESIGN")
-                    const fallbackMatch = descriptionText.match(/^([A-Z][A-Z\s&]+)/);
-                    if (fallbackMatch) {
-                        brandName = fallbackMatch[1].trim().split(/\s{2,}/)[0]; // Stop at double space
-                    }
-                }
-                
-                // Additional fallback: extract first 2-4 capitalized words if still no brand
-                if (!brandName) {
-                    const capitalWords = descriptionText.match(/^([A-Z][A-Za-z]+(?:\s+[A-Z&][A-Za-z]*){0,3})/);
-                    if (capitalWords) {
-                        const extracted = capitalWords[1].trim();
-                        // Stop before size indicators or common modifiers
-                        const cleanBrand = extracted.replace(/\s+(Big|Tall|Plus|Size|Collection).*$/i, '').trim();
-                        if (cleanBrand.length > 2) {
-                            brandName = cleanBrand;
+                    
+                    // Additional fallback: extract first 2-4 capitalized words if still no brand
+                    if (!brandName) {
+                        const capitalWords = descriptionText.match(/^([A-Z][A-Za-z]+(?:\s+[A-Z&][A-Za-z]*){0,3})/);
+                        if (capitalWords) {
+                            const extracted = capitalWords[1].trim();
+                            // Stop before size indicators or common modifiers
+                            const cleanBrand = extracted.replace(/\s+(Big|Tall|Plus|Size|Collection).*$/i, '').trim();
+                            if (cleanBrand.length > 2) {
+                                brandName = cleanBrand;
+                            }
                         }
                     }
                 }
