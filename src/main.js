@@ -636,22 +636,21 @@ function normalizeImageUrl(url) {
             clean = `https://${clean.replace(/^\/+/, '')}`;
         }
     } else if (!clean.startsWith('http')) {
-        // Handle relative paths - ASOS often provides paths like 'products/bershka-baggy-jeans.../209377957-1-black'
+        // Handle relative paths
         clean = `https://images.asos-media.com/${clean.replace(/^\/+/, '')}`;
     }
 
     // Remove query parameters first
     clean = clean.split('?')[0];
 
-    // ASOS images need proper size suffix and extension if they are missing
+    // Handle URLs that end with '/' - replace with .jpg
+    if (clean.endsWith('/')) {
+        clean = clean.slice(0, -1) + '.jpg';
+    }
+
+    // ASOS images need proper extension if missing
     if (!clean.match(/\.(jpg|jpeg|png|webp)$/i)) {
-        // Only append if it looks like a path without an extension
-        // Check if it already has a common suffix (e.g., -1, -1-product)
-        if (!clean.match(/-\d+(-[a-z]+)?$/i)) {
-            // Add default suffix if totally missing extension and suffix
-            clean = `${clean}-1`;
-        }
-        // Add .jpg extension
+        // Just add .jpg extension
         clean = `${clean}.jpg`;
     }
 
@@ -735,17 +734,35 @@ function parseDomProducts(html, $) {
             
             // If still no image, try to extract from href or construct from product ID
             if (!imageUrl || imageUrl.includes('placeholder') || imageUrl.includes('data:image')) {
-                // Try to construct image URL from product ID
+                // Try to construct image URL from product ID - use a simpler approach
                 if (idMatch && idMatch[1]) {
                     const productId = idMatch[1];
-                    // ASOS image pattern: //images.asos-media.com/products/{path}/{productId}-1-{color}
-                    imageUrl = `//images.asos-media.com/products/${href.split('/').slice(-3, -1).join('/')}/${productId}-1`;
+                    // Extract color from title if available for better image URL
+                    let colorSlug = '';
+                    if (descriptionText) {
+                        const colorMatch = descriptionText.match(/in\s+([a-z]+(?:\s+[a-z]+)*?)(?:\s|$)/i);
+                        if (colorMatch) {
+                            colorSlug = colorMatch[1].toLowerCase().replace(/\s+/g, '');
+                        }
+                    }
+                    // Simple fallback: just use product ID with basic format
+                    imageUrl = `//images.asos-media.com/products/${productId}-1${colorSlug ? '-' + colorSlug : ''}`;
                 }
             }
 
             // Normalize and ensure proper format
             if (imageUrl && !imageUrl.includes('placeholder') && !imageUrl.includes('data:image')) {
-                imageUrl = normalizeImageUrl(imageUrl);
+                // If the URL already ends with .jpg, use it as-is
+                if (imageUrl.match(/\.(jpg|jpeg|png|webp)$/i)) {
+                    if (imageUrl.startsWith('//')) {
+                        imageUrl = `https:${imageUrl}`;
+                    } else if (!imageUrl.startsWith('http')) {
+                        imageUrl = `https://images.asos-media.com/${imageUrl.replace(/^\/+/, '')}`;
+                    }
+                } else {
+                    // Only apply normalization if it doesn't already have an extension
+                    imageUrl = normalizeImageUrl(imageUrl);
+                }
             } else {
                 imageUrl = null;
             }
