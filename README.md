@@ -38,13 +38,15 @@ Track product availability and stock levels across categories. Monitor what sell
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `keyword` | String | No | `"men"` | Search term to find products |
-| `startUrl` | String | No | — | Direct ASOS search or category URL |
-| `minPrice` | Number | No | — | Minimum product price |
-| `maxPrice` | Number | No | — | Maximum product price |
+| `keyword` | String | No* | — | Search term to find products |
+| `startUrl` | String | No* | — | Direct ASOS search or category URL. If provided, overrides keyword search. |
+| `minPrice` | Number | No | — | Filter products with price greater than or equal to this value. |
+| `maxPrice` | Number | No | — | Filter products with price less than or equal to this value. |
 | `sortBy` | String | No | `"pricedesc"` | Sort order: `pricedesc`, `priceasc`, `freshness` |
 | `results_wanted` | Integer | No | `20` | Maximum number of products to collect |
 | `proxyConfiguration` | Object | No | Residential | Proxy settings for requests |
+
+**\*Note:** Either `keyword` OR `startUrl` must be provided.
 
 ---
 
@@ -80,6 +82,17 @@ Search for products using a simple keyword:
 {
     "keyword": "dresses",
     "results_wanted": 50
+}
+```
+
+### Direct URL Input
+
+Start from a specific ASOS category or search results page:
+
+```json
+{
+    "startUrl": "https://www.asos.com/search/?q=women+dresses&page=1&sort=freshness",
+    "results_wanted": 100
 }
 ```
 

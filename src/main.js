@@ -160,7 +160,7 @@ function normalizeApiProduct(product) {
 
 const input = (await Actor.getInput()) || {};
 const {
-    keyword = 'men',
+    keyword,
     startUrl,
     minPrice,
     maxPrice,
@@ -171,7 +171,14 @@ const {
 
 const resultsWanted = Number.isFinite(+resultsWantedRaw) ? Math.max(1, +resultsWantedRaw) : 20;
 
-log.info(`Starting ASOS scraper for keyword: "${keyword}", results wanted: ${resultsWanted}`);
+// Validate that either keyword or startUrl is provided
+if (!keyword && !startUrl) {
+    throw new Error('Either "keyword" or "startUrl" must be provided. Please specify a search keyword or a direct ASOS URL to scrape.');
+}
+
+const searchKeyword = keyword || 'men'; // Default fallback for internal use
+
+log.info(`Starting ASOS scraper for ${keyword ? `keyword: "${keyword}"` : `URL: ${startUrl}`}, results wanted: ${resultsWanted}`);
 
 const headerGenerator = new HeaderGenerator({
     browsers: [{ name: 'chrome', minVersion: 120, httpVersion: '2' }],
@@ -186,7 +193,7 @@ const proxyConfiguration = await Actor.createProxyConfiguration(
 
 const buildSearchUrl = (page = 1) => {
     const url = new URL('https://www.asos.com/search/');
-    url.searchParams.set('q', keyword);
+    url.searchParams.set('q', searchKeyword);
     url.searchParams.set('page', String(page));
     if (sortBy) url.searchParams.set('sort', sortBy);
     return url.toString();

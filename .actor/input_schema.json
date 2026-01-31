@@ -1,15 +1,15 @@
 {
     "title": "ASOS Product Scraper",
-    "description": "Extract product listings from ASOS. Search by keyword or use a direct URL. Get product details including prices, brands, colors, sizes, and images.",
+    "description": "Scrape ASOS product listings using either a search keyword or direct URL. Extract prices, brands, colors, sizes, discounts, and product images from one of the world's leading fashion retailers.",
     "type": "object",
     "schemaVersion": 1,
     "properties": {
         "startUrl": {
             "title": "Start URL",
             "type": "string",
-            "description": "Direct ASOS search or category URL. If provided, overrides keyword search.",
+            "description": "Direct ASOS search or category URL. If provided, overrides keyword search. Example: https://www.asos.com/search/?q=women+dresses",
             "editor": "textfield",
-            "prefill": "https://www.asos.com/search/?q=men+shoes"
+            "prefill": "https://www.asos.com/search/?q=women+dresses"
         },
         "keyword": {
             "title": "Search Keyword",
@@ -68,6 +68,6 @@
             }
         }
     },
-    "required": ["keyword"],
+    "required": [],
     "additionalProperties": false
 }
